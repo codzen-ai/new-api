@@ -1,0 +1,54 @@
+{
+    "name": "New API Development",
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "devcontainer",
+    "workspaceFolder": "/workspace",
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": true,
+            "configureZshAsDefaultShell": true,
+            "installOhMyZsh": true
+        }
+    },
+    // SSH Agent 转发由 VS Code Dev Containers 扩展自动处理
+    // 不需要手动挂载 SSH socket，避免路径变更导致的问题
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "golang.go",
+                "ms-vscode.vscode-typescript-next",
+                "dbaeumer.vscode-eslint",
+                "esbenp.prettier-vscode",
+                "bradlc.vscode-tailwindcss",
+                "ms-azuretools.vscode-docker",
+                "humao.rest-client",
+                "mtxr.sqltools",
+                "mtxr.sqltools-driver-pg",
+                "formulahendry.auto-rename-tag",
+                "RooVeterinaryInc.roo-cline",
+                "eamodio.gitlens",
+                "anthropic.claude-code"
+            ],
+            "settings": {
+                "go.useLanguageServer": true,
+                "go.lintTool": "golangci-lint",
+                "go.lintOnSave": "package",
+                "editor.formatOnSave": true,
+                "[go]": {
+                    "editor.defaultFormatter": "golang.go"
+                },
+                "terminal.integrated.defaultProfile.linux": "zsh"
+            }
+        }
+    },
+    "forwardPorts": [
+        3000,
+        5173,
+        8005
+    ],
+    "postCreateCommand": "cd /workspace && go mod download && cd web && bun install",
+    "postStartCommand": {
+        "backend": "cd /workspace && air"
+    },
+    "remoteUser": "root"
+}
