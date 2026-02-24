@@ -578,6 +578,125 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 	return logs, total, err
 }
 
+// buildLogExportQuery constructs the shared WHERE conditions for log export queries.
+func buildLogExportQuery(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string) (*gorm.DB, error) {
+	var tx *gorm.DB
+	if logType == LogTypeUnknown {
+		tx = LOG_DB
+	} else {
+		tx = LOG_DB.Where("logs.type = ?", logType)
+	}
+	var err error
+	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
+		return nil, err
+	}
+	if tx, err = applyExplicitLogTextFilter(tx, "logs.username", username); err != nil {
+		return nil, err
+	}
+	if tokenName != "" {
+		tx = tx.Where("logs.token_name = ?", tokenName)
+	}
+	if requestId != "" {
+		tx = tx.Where("logs.request_id = ?", requestId)
+	}
+	if upstreamRequestId != "" {
+		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
+	}
+	if startTimestamp != 0 {
+		tx = tx.Where("logs.created_at >= ?", startTimestamp)
+	}
+	if endTimestamp != 0 {
+		tx = tx.Where("logs.created_at <= ?", endTimestamp)
+	}
+	if channel != 0 {
+		tx = tx.Where("logs.channel_id = ?", channel)
+	}
+	if group != "" {
+		tx = tx.Where("logs."+logGroupCol+" = ?", group)
+	}
+	return tx, nil
+}
+
+// fillLogsChannelName populates the ChannelName field for a slice of logs.
+func fillLogsChannelName(logs []*Log) {
+	channelIds := types.NewSet[int]()
+	for _, log := range logs {
+		if log.ChannelId != 0 {
+			channelIds.Add(log.ChannelId)
+		}
+	}
+	if channelIds.Len() == 0 {
+		return
+	}
+	var channels []struct {
+		Id   int    `gorm:"column:id"`
+		Name string `gorm:"column:name"`
+	}
+	if common.MemoryCacheEnabled {
+		for _, channelId := range channelIds.Items() {
+			if cacheChannel, err := CacheGetChannel(channelId); err == nil {
+				channels = append(channels, struct {
+					Id   int    `gorm:"column:id"`
+					Name string `gorm:"column:name"`
+				}{Id: channelId, Name: cacheChannel.Name})
+			}
+		}
+	} else {
+		if err := DB.Table("channels").Select("id, name").Where("id IN ?", channelIds.Items()).Find(&channels).Error; err != nil {
+			return
+		}
+	}
+	channelMap := make(map[int]string, len(channels))
+	for _, ch := range channels {
+		channelMap[ch.Id] = ch.Name
+	}
+	for i := range logs {
+		logs[i].ChannelName = channelMap[logs[i].ChannelId]
+	}
+}
+
+// CountAllLogsForExport returns the total number of logs matching the given filters.
+func CountAllLogsForExport(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string) (int64, error) {
+	tx, err := buildLogExportQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	err = tx.Model(&Log{}).Count(&total).Error
+	return total, err
+}
+
+// StreamAllLogsForExport iterates over all matching logs in cursor-based batches
+// and calls handler for each batch. Stops early if handler returns an error.
+func StreamAllLogsForExport(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string, batchSize int, handler func([]*Log) error) error {
+	lastId := 0 // 0 means no cursor yet (we use id > 0 for the very first batch)
+	for {
+		var batch []*Log
+		tx, err := buildLogExportQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
+		if err != nil {
+			return err
+		}
+		if lastId > 0 {
+			tx = tx.Where("logs.id < ?", lastId)
+		}
+		if err := tx.Order("logs.id desc").Limit(batchSize).Find(&batch).Error; err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		fillLogsChannelName(batch)
+		if err := handler(batch); err != nil {
+			return err
+		}
+		lastId = batch[len(batch)-1].Id
+		if len(batch) < batchSize {
+			break
+		}
+	}
+	return nil
+}
+
 const logSearchCountLimit = 10000
 
 func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
