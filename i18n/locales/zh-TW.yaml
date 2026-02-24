@@ -90,3 +90,7 @@ channel.upstream_update_added_models: "新增模型範例（顯示 {{.Shown}}/{{
 channel.upstream_update_removed_models: "刪除模型範例（顯示 {{.Shown}}/{{.Total}}）：{{.Models}}"
 channel.upstream_update_failed_channels: "失敗管道 ID（顯示 {{.Shown}}/{{.Total}}）：{{.Ids}}"
 channel.upstream_update_more_omitted: "（其餘 {{.Count}} 個已省略）"
+
+# Log messages
+log.export_too_many: "記錄數量超出限制，請縮小查詢範圍（最多 10 萬筆）"
+log.export_failed: "日誌匯出失敗，請稍後重試"

@@ -48,6 +48,12 @@ const (
 	MsgRelayAccessTokenUnsupported       = "relay.access_token_unsupported"
 )
 
+// Log related messages
+const (
+	MsgLogExportTooMany = "log.export_too_many"
+	MsgLogExportFailed  = "log.export_failed"
+)
+
 // Emails and the name of the token created at registration, in the
 // recipient's language
 const (
