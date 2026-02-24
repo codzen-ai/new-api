@@ -43,7 +43,7 @@ func Login(c *gin.Context) {
 	username := loginRequest.Username
 	password := loginRequest.Password
 	if username == "" || password == "" {
-		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		common.ApiErrorI18n(c, i18n.MsgUserUsernameOrPasswordEmpty)
 		return
 	}
 	user := model.User{
@@ -52,10 +52,7 @@ func Login(c *gin.Context) {
 	}
 	err = user.ValidateAndFill()
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"message": err.Error(),
-			"success": false,
-		})
+		common.ApiError(c, err)
 		return
 	}
 

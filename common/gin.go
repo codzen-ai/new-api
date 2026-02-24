@@ -178,7 +178,30 @@ func GetContextKeyType[T any](c *gin.Context, key constant.ContextKey) (T, bool)
 	return t, false
 }
 
+// I18nError is an error that carries an i18n message key and optional template params.
+// Use common.NewI18nError to create one; use common.ApiError to render it.
+type I18nError struct {
+	Key    string
+	Params map[string]any
+}
+
+func (e *I18nError) Error() string { return e.Key }
+
+// NewI18nError creates an error with an i18n key and optional template params.
+func NewI18nError(key string, params ...map[string]any) error {
+	e := &I18nError{Key: key}
+	if len(params) > 0 {
+		e.Params = params[0]
+	}
+	return e
+}
+
 func ApiError(c *gin.Context, err error) {
+	var i18nErr *I18nError
+	if errors.As(err, &i18nErr) {
+		ApiErrorI18n(c, i18nErr.Key, i18nErr.Params)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": false,
 		"message": err.Error(),
