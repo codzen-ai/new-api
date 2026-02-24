@@ -243,13 +243,27 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 }
 
 func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string) (logs []*Log, total int64, err error) {
+	tx := buildLogExportQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId)
+	err = tx.Model(&Log{}).Count(&total).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	err = tx.Order("logs.id desc").Limit(num).Offset(startIdx).Find(&logs).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	fillLogsChannelName(logs)
+	return logs, total, err
+}
+
+// buildLogExportQuery constructs the shared WHERE conditions for log export queries.
+func buildLogExportQuery(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId string) *gorm.DB {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB
 	} else {
 		tx = LOG_DB.Where("logs.type = ?", logType)
 	}
-
 	if modelName != "" {
 		tx = tx.Where("logs.model_name like ?", modelName)
 	}
@@ -274,56 +288,81 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
-	err = tx.Model(&Log{}).Count(&total).Error
-	if err != nil {
-		return nil, 0, err
-	}
-	err = tx.Order("logs.id desc").Limit(num).Offset(startIdx).Find(&logs).Error
-	if err != nil {
-		return nil, 0, err
-	}
+	return tx
+}
 
+// fillLogsChannelName populates the ChannelName field for a slice of logs.
+func fillLogsChannelName(logs []*Log) {
 	channelIds := types.NewSet[int]()
 	for _, log := range logs {
 		if log.ChannelId != 0 {
 			channelIds.Add(log.ChannelId)
 		}
 	}
-
-	if channelIds.Len() > 0 {
-		var channels []struct {
-			Id   int    `gorm:"column:id"`
-			Name string `gorm:"column:name"`
-		}
-		if common.MemoryCacheEnabled {
-			// Cache get channel
-			for _, channelId := range channelIds.Items() {
-				if cacheChannel, err := CacheGetChannel(channelId); err == nil {
-					channels = append(channels, struct {
-						Id   int    `gorm:"column:id"`
-						Name string `gorm:"column:name"`
-					}{
-						Id:   channelId,
-						Name: cacheChannel.Name,
-					})
-				}
-			}
-		} else {
-			// Bulk query channels from DB
-			if err = DB.Table("channels").Select("id, name").Where("id IN ?", channelIds.Items()).Find(&channels).Error; err != nil {
-				return logs, total, err
+	if channelIds.Len() == 0 {
+		return
+	}
+	var channels []struct {
+		Id   int    `gorm:"column:id"`
+		Name string `gorm:"column:name"`
+	}
+	if common.MemoryCacheEnabled {
+		for _, channelId := range channelIds.Items() {
+			if cacheChannel, err := CacheGetChannel(channelId); err == nil {
+				channels = append(channels, struct {
+					Id   int    `gorm:"column:id"`
+					Name string `gorm:"column:name"`
+				}{Id: channelId, Name: cacheChannel.Name})
 			}
 		}
-		channelMap := make(map[int]string, len(channels))
-		for _, channel := range channels {
-			channelMap[channel.Id] = channel.Name
-		}
-		for i := range logs {
-			logs[i].ChannelName = channelMap[logs[i].ChannelId]
+	} else {
+		if err := DB.Table("channels").Select("id, name").Where("id IN ?", channelIds.Items()).Find(&channels).Error; err != nil {
+			return
 		}
 	}
+	channelMap := make(map[int]string, len(channels))
+	for _, ch := range channels {
+		channelMap[ch.Id] = ch.Name
+	}
+	for i := range logs {
+		logs[i].ChannelName = channelMap[logs[i].ChannelId]
+	}
+}
 
-	return logs, total, err
+// CountAllLogsForExport returns the total number of logs matching the given filters.
+func CountAllLogsForExport(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId string) (int64, error) {
+	tx := buildLogExportQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId)
+	var total int64
+	err := tx.Model(&Log{}).Count(&total).Error
+	return total, err
+}
+
+// StreamAllLogsForExport iterates over all matching logs in cursor-based batches
+// and calls handler for each batch. Stops early if handler returns an error.
+func StreamAllLogsForExport(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId string, batchSize int, handler func([]*Log) error) error {
+	lastId := 0 // 0 means no cursor yet (we use id > 0 for the very first batch)
+	for {
+		var batch []*Log
+		tx := buildLogExportQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId)
+		if lastId > 0 {
+			tx = tx.Where("logs.id < ?", lastId)
+		}
+		if err := tx.Order("logs.id desc").Limit(batchSize).Find(&batch).Error; err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		fillLogsChannelName(batch)
+		if err := handler(batch); err != nil {
+			return err
+		}
+		lastId = batch[len(batch)-1].Id
+		if len(batch) < batchSize {
+			break
+		}
+	}
+	return nil
 }
 
 const logSearchCountLimit = 10000
