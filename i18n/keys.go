@@ -320,6 +320,12 @@ const (
 	MsgDistributorInvalidParseModel       = "distributor.invalid_request_parse_model"
 )
 
+// Log related messages
+const (
+	MsgLogExportTooMany = "log.export_too_many"
+	MsgLogExportFailed  = "log.export_failed"
+)
+
 // Custom OAuth provider related messages
 const (
 	MsgCustomOAuthNotFound          = "custom_oauth.not_found"
