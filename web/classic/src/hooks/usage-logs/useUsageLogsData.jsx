@@ -30,6 +30,7 @@ import {
   renderQuota,
   renderNumber,
   getLogOther,
+  downloadLogsCsv,
   copy,
   renderClaudeLogContent,
   renderLogContent,
@@ -796,6 +797,42 @@ export const useLogsData = () => {
     await loadLogs(1, pageSize);
   };
 
+  // Export logs as CSV (admin only)
+  const [exportLoading, setExportLoading] = useState(false);
+  const exportLogs = async () => {
+    if (exportLoading) return;
+    setExportLoading(true);
+    const {
+        username,
+        token_name,
+        model_name,
+        start_timestamp,
+        end_timestamp,
+        channel,
+        group,
+        request_id,
+        logType: type,
+      } = getFormValues();
+
+    try {
+      await downloadLogsCsv({
+        type,
+        username,
+        token_name,
+        model_name,
+        start_timestamp: Date.parse(start_timestamp) / 1000,
+        end_timestamp: Date.parse(end_timestamp) / 1000,
+        channel,
+        group,
+        request_id,
+      });
+    } catch (e) {
+      showError(e.message || t('导出日志失败'));
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
   // Copy text function
   const copyText = async (e, text) => {
     e.stopPropagation();
@@ -887,6 +924,8 @@ export const useLogsData = () => {
     handlePageChange,
     handlePageSizeChange,
     refresh,
+    exportLogs,
+    exportLoading,
     copyText,
     handleEyeClick,
     setLogsFormat,
