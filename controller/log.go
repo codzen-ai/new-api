@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	i18n "github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
 )
@@ -185,18 +186,23 @@ const logExportMaxCount = 100_000
 var logCSVHeader = []string{
 	"id", "created_at", "type", "username", "token_name", "model_name",
 	"channel", "channel_name", "prompt_tokens", "completion_tokens",
-	"quota", "use_time", "is_stream", "token_id", "group", "ip",
+	"quota", "usd", "cny", "use_time", "is_stream", "token_id", "group", "ip",
 	"request_id", "content",
 }
+
+// logExportTimeZone is the fixed UTC+8 zone used to render exported timestamps.
+var logExportTimeZone = time.FixedZone("UTC+8", 8*60*60)
 
 func logToCSVRow(l *model.Log) []string {
 	isStream := "false"
 	if l.IsStream {
 		isStream = "true"
 	}
+	usd := float64(l.Quota) / common.QuotaPerUnit
+	cny := usd * operation_setting.USDExchangeRate
 	return []string{
 		strconv.Itoa(l.Id),
-		time.Unix(l.CreatedAt, 0).UTC().Format("2006-01-02 15:04:05"),
+		time.Unix(l.CreatedAt, 0).In(logExportTimeZone).Format("2006-01-02 15:04:05"),
 		strconv.Itoa(l.Type),
 		l.Username,
 		l.TokenName,
@@ -206,6 +212,8 @@ func logToCSVRow(l *model.Log) []string {
 		strconv.Itoa(l.PromptTokens),
 		strconv.Itoa(l.CompletionTokens),
 		strconv.Itoa(l.Quota),
+		strconv.FormatFloat(usd, 'f', 6, 64),
+		strconv.FormatFloat(cny, 'f', 6, 64),
 		strconv.Itoa(l.UseTime),
 		isStream,
 		strconv.Itoa(l.TokenId),
@@ -238,7 +246,7 @@ func ExportAllLogs(c *gin.Context) {
 		return
 	}
 
-	filename := fmt.Sprintf("logs_%s.csv", time.Now().UTC().Format("20060102_150405"))
+	filename := fmt.Sprintf("logs_%s.csv", time.Now().In(logExportTimeZone).Format("20060102_150405"))
 	c.Header("Content-Type", "text/csv; charset=utf-8")
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	c.Header("Transfer-Encoding", "chunked")
