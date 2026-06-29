@@ -186,12 +186,28 @@ const logExportMaxCount = 100_000
 var logCSVHeader = []string{
 	"id", "created_at", "type", "username", "token_name", "model_name",
 	"channel", "channel_name", "prompt_tokens", "completion_tokens",
+	"cache_tokens", "cache_creation_tokens", "model_ratio", "group_ratio",
+	"completion_ratio", "cache_ratio", "model_price", "billing_mode",
 	"quota", "usd", "cny", "use_time", "is_stream", "token_id", "group", "ip",
 	"request_id", "content",
 }
 
 // logExportTimeZone is the fixed UTC+8 zone used to render exported timestamps.
 var logExportTimeZone = time.FixedZone("UTC+8", 8*60*60)
+
+// logBillingOther holds the billing breakdown persisted in Log.Other, used to
+// make each exported row's quota explainable. See service/log_info_generate.go
+// for how these fields are produced.
+type logBillingOther struct {
+	CacheTokens         int     `json:"cache_tokens"`
+	CacheCreationTokens int     `json:"cache_creation_tokens"`
+	ModelRatio          float64 `json:"model_ratio"`
+	GroupRatio          float64 `json:"group_ratio"`
+	CompletionRatio     float64 `json:"completion_ratio"`
+	CacheRatio          float64 `json:"cache_ratio"`
+	ModelPrice          float64 `json:"model_price"`
+	BillingMode         string  `json:"billing_mode"`
+}
 
 func logToCSVRow(l *model.Log) []string {
 	isStream := "false"
@@ -200,6 +216,29 @@ func logToCSVRow(l *model.Log) []string {
 	}
 	usd := float64(l.Quota) / common.QuotaPerUnit
 	cny := usd * operation_setting.USDExchangeRate
+
+	// Non-consume logs (system, top-up, error) may have an empty or differently
+	// shaped Other; on parse failure the billing columns stay blank.
+	var billing logBillingOther
+	hasBilling := false
+	if l.Other != "" {
+		if err := common.UnmarshalJsonStr(l.Other, &billing); err == nil {
+			hasBilling = true
+		}
+	}
+	formatRatio := func(v float64) string {
+		if !hasBilling {
+			return ""
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	formatTokens := func(v int) string {
+		if !hasBilling {
+			return ""
+		}
+		return strconv.Itoa(v)
+	}
+
 	return []string{
 		strconv.Itoa(l.Id),
 		time.Unix(l.CreatedAt, 0).In(logExportTimeZone).Format("2006-01-02 15:04:05"),
@@ -211,6 +250,14 @@ func logToCSVRow(l *model.Log) []string {
 		l.ChannelName,
 		strconv.Itoa(l.PromptTokens),
 		strconv.Itoa(l.CompletionTokens),
+		formatTokens(billing.CacheTokens),
+		formatTokens(billing.CacheCreationTokens),
+		formatRatio(billing.ModelRatio),
+		formatRatio(billing.GroupRatio),
+		formatRatio(billing.CompletionRatio),
+		formatRatio(billing.CacheRatio),
+		formatRatio(billing.ModelPrice),
+		billing.BillingMode,
 		strconv.Itoa(l.Quota),
 		strconv.FormatFloat(usd, 'f', 6, 64),
 		strconv.FormatFloat(cny, 'f', 6, 64),
