@@ -64,11 +64,20 @@ func GetPricing(c *gin.Context) {
 		}
 	}
 
+	// 分组模型倍率：仅返回用户可用分组的覆盖，避免泄露专属/私有分组价格
+	groupModelRatio := map[string]map[string]float64{}
+	for g := range usableGroup {
+		if gm, ok := ratio_setting.GetGroupModelRatioByGroup(g); ok {
+			groupModelRatio[g] = gm
+		}
+	}
+
 	c.JSON(200, gin.H{
 		"success":            true,
 		"data":               pricing,
 		"vendors":            model.GetVendors(),
 		"group_ratio":        groupRatio,
+		"group_model_ratio":  groupModelRatio,
 		"usable_group":       usableGroup,
 		"supported_endpoint": model.GetSupportedEndpointMap(),
 		"auto_groups":        service.GetUserAutoGroup(group),

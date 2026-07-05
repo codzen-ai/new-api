@@ -11,6 +11,8 @@ type GroupRatioInfo struct {
 	GroupRatio        float64
 	GroupSpecialRatio float64
 	HasSpecialRatio   bool
+	// ModelRatioOverridden 表示本次计费命中了分组模型倍率（覆盖即最终价，分组倍率未参与）
+	ModelRatioOverridden bool
 }
 
 type PriceData struct {
