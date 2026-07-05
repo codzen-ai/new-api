@@ -50,6 +50,10 @@ export type PricingModel = {
   supported_endpoint_types?: string[]
   key?: string
   group_ratio?: Record<string, number>
+  /** Per-group model ratio overrides: group -> { model_name: ratio }.
+   * When present for (group, model_name), this ratio is the final model ratio
+   * for that group and the group ratio no longer applies (override = final price). */
+  group_model_ratio?: Record<string, Record<string, number>>
   /** Billing mode (e.g. "tiered_expr") used to flag dynamic pricing */
   billing_mode?: string
   /** Raw expression describing dynamic / tiered billing */
@@ -94,6 +98,7 @@ export type PricingData = {
   data: PricingModel[]
   vendors: PricingVendor[]
   group_ratio: Record<string, number>
+  group_model_ratio?: Record<string, Record<string, number>>
   usable_group: Record<string, { desc: string; ratio: number }>
   supported_endpoint: Record<string, string>
   auto_groups: string[]

@@ -5330,6 +5330,9 @@
     "Every billing var must be of kind int or enum": "課金変数の kind は int または enum である必要があります",
     "Every billing var requires a default": "すべての課金変数に default が必要です",
     "Every enum billing var requires values": "enum 型の課金変数には values が必要です",
-    "A billing var that contributes a multiplier must declare max or enum": "倍率に寄与する課金変数は max または enum を宣言する必要があります"
+    "A billing var that contributes a multiplier must declare max or enum": "倍率に寄与する課金変数は max または enum を宣言する必要があります",
+    "Nested JSON: group →": "Nested JSON: group →",
+    "Per-group model ratio": "Per-group model ratio",
+    "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models.": "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models."
   }
 }
