@@ -5330,6 +5330,9 @@
     "Every billing var must be of kind int or enum": "Каждая переменная тарификации должна иметь kind int или enum",
     "Every billing var requires a default": "Каждая переменная тарификации требует default",
     "Every enum billing var requires values": "Переменная тарификации типа enum требует values",
-    "A billing var that contributes a multiplier must declare max or enum": "Переменная тарификации, дающая множитель, должна объявлять max или enum"
+    "A billing var that contributes a multiplier must declare max or enum": "Переменная тарификации, дающая множитель, должна объявлять max или enum",
+    "Nested JSON: group →": "Nested JSON: group →",
+    "Per-group model ratio": "Per-group model ratio",
+    "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models.": "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models."
   }
 }

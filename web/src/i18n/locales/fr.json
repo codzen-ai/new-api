@@ -5330,6 +5330,9 @@
     "Every billing var must be of kind int or enum": "Chaque variable de facturation doit être de type int ou enum",
     "Every billing var requires a default": "Chaque variable de facturation requiert un default",
     "Every enum billing var requires values": "Chaque variable de facturation de type enum requiert values",
-    "A billing var that contributes a multiplier must declare max or enum": "Une variable de facturation qui produit un multiplicateur doit déclarer max ou enum"
+    "A billing var that contributes a multiplier must declare max or enum": "Une variable de facturation qui produit un multiplicateur doit déclarer max ou enum",
+    "Nested JSON: group →": "Nested JSON: group →",
+    "Per-group model ratio": "Per-group model ratio",
+    "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models.": "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models."
   }
 }

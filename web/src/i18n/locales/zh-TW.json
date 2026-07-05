@@ -5330,6 +5330,9 @@
     "Every billing var must be of kind int or enum": "計費變數的 kind 只能是 int 或 enum",
     "Every billing var requires a default": "每個計費變數都必須填寫 default",
     "Every enum billing var requires values": "enum 類型的計費變數必須填寫 values",
-    "A billing var that contributes a multiplier must declare max or enum": "參與計費倍率的計費變數必須宣告 max 或 enum"
+    "A billing var that contributes a multiplier must declare max or enum": "參與計費倍率的計費變數必須宣告 max 或 enum",
+    "Nested JSON: group →": "巢狀 JSON：分組 →",
+    "Per-group model ratio": "分組模型倍率",
+    "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models.": "設定該分組下該模型的最終倍率（分組倍率對該模型不再生效）。僅對按量倍率計費的模型有效。"
   }
 }

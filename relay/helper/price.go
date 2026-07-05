@@ -99,6 +99,15 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		var success bool
 		var matchName string
 		modelRatio, success, matchName = ratio_setting.GetModelRatio(info.OriginModelName)
+		// 分组模型倍率（覆盖即最终价）：命中则该值为最终模型倍率，分组倍率归一为 1.0
+		if newModelRatio, newGroupRatio, overridden := ratio_setting.ResolveGroupModelPrice(info.UsingGroup, info.OriginModelName, modelRatio, groupRatioInfo.GroupRatio); overridden {
+			modelRatio = newModelRatio
+			success = true
+			groupRatioInfo.GroupRatio = newGroupRatio
+			groupRatioInfo.GroupSpecialRatio = -1
+			groupRatioInfo.HasSpecialRatio = false
+			groupRatioInfo.ModelRatioOverridden = true
+		}
 		if !success {
 			acceptUnsetRatio := false
 			if info.UserSetting.AcceptUnsetRatioModel {
@@ -200,6 +209,15 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (hostt
 			var ratioSuccess bool
 			var matchName string
 			modelRatio, ratioSuccess, matchName = ratio_setting.GetModelRatio(info.OriginModelName)
+			// 分组模型倍率（覆盖即最终价）：命中则该值为最终模型倍率，分组倍率归一为 1.0
+			if newModelRatio, newGroupRatio, overridden := ratio_setting.ResolveGroupModelPrice(info.UsingGroup, info.OriginModelName, modelRatio, groupRatioInfo.GroupRatio); overridden {
+				modelRatio = newModelRatio
+				ratioSuccess = true
+				groupRatioInfo.GroupRatio = newGroupRatio
+				groupRatioInfo.GroupSpecialRatio = -1
+				groupRatioInfo.HasSpecialRatio = false
+				groupRatioInfo.ModelRatioOverridden = true
+			}
 			acceptUnsetRatio := false
 			if info.UserSetting.AcceptUnsetRatioModel {
 				acceptUnsetRatio = true

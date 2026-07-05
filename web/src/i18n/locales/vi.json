@@ -5330,6 +5330,9 @@
     "Every billing var must be of kind int or enum": "Mỗi biến tính phí phải có kind là int hoặc enum",
     "Every billing var requires a default": "Mỗi biến tính phí đều cần default",
     "Every enum billing var requires values": "Biến tính phí kiểu enum cần có values",
-    "A billing var that contributes a multiplier must declare max or enum": "Biến tính phí tạo ra hệ số nhân phải khai báo max hoặc enum"
+    "A billing var that contributes a multiplier must declare max or enum": "Biến tính phí tạo ra hệ số nhân phải khai báo max hoặc enum",
+    "Nested JSON: group →": "Nested JSON: group →",
+    "Per-group model ratio": "Per-group model ratio",
+    "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models.": "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models."
   }
 }
