@@ -60,6 +60,40 @@ func TestGetGroupModelRatioByGroup(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// TestGetGroupModelRatioForUsableGroups 锁定定价接口的安全边界：
+// 只返回用户可用分组的覆盖，专属/私有分组的价格不得外泄。
+func TestGetGroupModelRatioForUsableGroups(t *testing.T) {
+	restore := setGroupModelRatio(t, `{"vip":{"gpt-4o":5},"client_acme":{"gpt-4o":3}}`)
+	defer restore()
+
+	t.Run("私有分组不外泄", func(t *testing.T) {
+		// 用户可用分组仅 default / vip，不含专属分组 client_acme
+		usable := map[string]string{"default": "默认", "vip": "VIP"}
+		got := GetGroupModelRatioForUsableGroups(usable)
+
+		_, hasVip := got["vip"]
+		_, hasAcme := got["client_acme"]
+		assert.True(t, hasVip, "可用分组 vip 的覆盖应返回")
+		assert.False(t, hasAcme, "不可用的专属分组 client_acme 的价格不得外泄")
+		assert.Equal(t, map[string]float64{"gpt-4o": 5}, got["vip"])
+	})
+
+	t.Run("专属分组用户可见自己分组", func(t *testing.T) {
+		// client_acme 用户的可用分组含自身
+		usable := map[string]string{"default": "默认", "client_acme": "Acme 专属"}
+		got := GetGroupModelRatioForUsableGroups(usable)
+
+		assert.Equal(t, map[string]float64{"gpt-4o": 3}, got["client_acme"])
+		_, hasVip := got["vip"]
+		assert.False(t, hasVip)
+	})
+
+	t.Run("匿名用户（无可用分组）不返回任何覆盖", func(t *testing.T) {
+		got := GetGroupModelRatioForUsableGroups(map[string]string{})
+		assert.Empty(t, got)
+	})
+}
+
 // TestResolveGroupModelPrice 覆盖「覆盖即最终价」的核心不变量。
 func TestResolveGroupModelPrice(t *testing.T) {
 	restore := setGroupModelRatio(t, `{"vip":{"gpt-4o":5},"svip":{"gpt-4o":0}}`)
