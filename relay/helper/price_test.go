@@ -16,6 +16,65 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestModelPriceHelperAppliesGroupModelRatioOverride 端到端验证分组模型倍率的注入：
+// 命中覆盖时 modelRatio=覆盖值、groupRatio 归一为 1.0（覆盖即最终价，分组倍率失效），
+// 预扣额度体现 override×tokens 而非 override×groupRatio×tokens。
+func TestModelPriceHelperAppliesGroupModelRatioOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	origModelRatio := ratio_setting.ModelRatio2JSONString()
+	origGroupRatio := ratio_setting.GroupRatio2JSONString()
+	origGroupModelRatio := ratio_setting.GroupModelRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(origModelRatio))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(origGroupRatio))
+		require.NoError(t, ratio_setting.UpdateGroupModelRatioByJSONString(origGroupModelRatio))
+	})
+
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"gmr-test-model":10,"gmr-plain-model":10}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"gmr-vip":0.8}`))
+	require.NoError(t, ratio_setting.UpdateGroupModelRatioByJSONString(`{"gmr-vip":{"gmr-test-model":5}}`))
+
+	newContext := func(model string) (*gin.Context, *relaycommon.RelayInfo) {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.Header.Set("Content-Type", "application/json")
+		ctx.Request = req
+		info := &relaycommon.RelayInfo{
+			OriginModelName: model,
+			UserGroup:       "gmr-vip",
+			UsingGroup:      "gmr-vip",
+		}
+		return ctx, info
+	}
+
+	t.Run("命中覆盖：覆盖即最终价，分组倍率(0.8)失效", func(t *testing.T) {
+		ctx, info := newContext("gmr-test-model")
+		priceData, err := ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{})
+		require.NoError(t, err)
+
+		require.Equal(t, float64(5), priceData.ModelRatio)
+		require.Equal(t, float64(1), priceData.GroupRatioInfo.GroupRatio)
+		require.True(t, priceData.GroupRatioInfo.ModelRatioOverridden)
+		// 预扣 = tokens(1000) × modelRatio(5) × groupRatio(1.0) = 5000
+		// 若分组倍率仍生效则为 4000；5000 证明 0.8 已被忽略（覆盖即最终价）
+		require.Equal(t, 5000, priceData.QuotaToPreConsume)
+	})
+
+	t.Run("未命中：回退全局倍率 × 分组倍率", func(t *testing.T) {
+		ctx, info := newContext("gmr-plain-model")
+		priceData, err := ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{})
+		require.NoError(t, err)
+
+		require.Equal(t, float64(10), priceData.ModelRatio)
+		require.Equal(t, float64(0.8), priceData.GroupRatioInfo.GroupRatio)
+		require.False(t, priceData.GroupRatioInfo.ModelRatioOverridden)
+		// 预扣 = tokens(1000) × modelRatio(10) × groupRatio(0.8) = 8000
+		require.Equal(t, 8000, priceData.QuotaToPreConsume)
+	})
+}
+
 func TestModelPriceHelperTieredUsesPreloadedRequestInput(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
