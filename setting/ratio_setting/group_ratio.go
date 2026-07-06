@@ -140,6 +140,18 @@ func GetGroupModelRatioByGroup(group string) (map[string]float64, bool) {
 	return out, true
 }
 
+// GetGroupModelRatioForUsableGroups 返回限定在给定可用分组内的分组模型倍率覆盖。
+// 供定价接口使用：只暴露用户可用分组的价格，避免专属/私有分组的价格外泄。
+func GetGroupModelRatioForUsableGroups(usableGroups map[string]string) map[string]map[string]float64 {
+	result := make(map[string]map[string]float64)
+	for group := range usableGroups {
+		if gm, ok := GetGroupModelRatioByGroup(group); ok {
+			result[group] = gm
+		}
+	}
+	return result
+}
+
 // ResolveGroupModelPrice 应用「覆盖即最终价」语义。
 // 命中分组模型倍率 → (override, 1.0, true)：覆盖值为最终模型倍率，分组倍率归一为 1.0。
 // 未命中 → (baseModelRatio, baseGroupRatio, false)：回退全局倍率 × 分组倍率。
