@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { t } from 'i18next'
+
 import { api } from '@/lib/api'
 
 import { buildQueryParams } from './lib/utils'
@@ -89,6 +91,47 @@ export async function getUserInfo(
 ): Promise<{ success: boolean; message?: string; data?: UserInfo }> {
   const res = await api.get(`/api/user/${userId}`)
   return res.data
+}
+
+/**
+ * Downloads the admin log export as a CSV blob, together with the filename the
+ * server assigned via Content-Disposition.
+ *
+ * The endpoint reports failures as HTTP 200 with a JSON body, which the shared
+ * response interceptor cannot detect here: under `responseType: 'blob'` the
+ * payload is a Blob, so its `success` flag is never visible. Sniff the blob's
+ * content type and surface the server message instead, otherwise a failed
+ * export would be saved as a .csv file containing an error object.
+ */
+export async function exportLogsCsv(
+  params: GetLogsParams
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await api.get(
+    `/api/log/export/csv?${buildQueryParams(
+      params as unknown as Record<string, unknown>
+    )}`,
+    {
+      responseType: 'blob',
+      disableDuplicate: true,
+    }
+  )
+
+  const blob = res.data as Blob
+  if (blob.type.includes('json') || blob.type.includes('text/plain')) {
+    const raw = await blob.text()
+    let message = ''
+    try {
+      message = (JSON.parse(raw) as { message?: string }).message || ''
+    } catch {
+      message = ''
+    }
+    throw new Error(message || t('Failed to export logs'))
+  }
+
+  const disposition = String(res.headers['content-disposition'] || '')
+  const filename = /filename="?([^";]+)"?/.exec(disposition)?.[1]
+
+  return { blob, filename: filename || 'logs.csv' }
 }
 
 // ============================================================================
