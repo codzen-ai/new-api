@@ -1,152 +1,102 @@
-# 日志导出功能缺失缓存字段问题分析与实现方案
+# 日志导出：缓存用量与缓存花费
 
-## 问题分析
+## 背景
 
-在 commit `b8b0ba61` 中实现的日志导出功能的 CSV 导出中，缺失了与大模型计费相关的缓存字段。
+CSV 日志导出（`controller/log.go` 的 `logCSVHeader` / `logToCSVRow`）此前只导出 `prompt_tokens`、`completion_tokens`、`quota`、`usd`、`cny`，无法体现缓存的用量和花费。对使用 prompt caching 的模型（Claude、OpenAI 等），缓存读取与缓存写入的单价与普通输入不同，缺少这些列就无法做成本分析，也看不出缓存到底省了多少钱。
 
-### 问题详情
+本文档描述导出缓存用量与缓存花费的实现方案，并明确其准确性边界。
 
-#### 1. **缺失的缓存相关字段**
+## `Log.Other` 中的实际字段
 
-当前 CSV 导出的字段（`controller/log.go` 第 179-184 行）：
-```go
-var logCSVHeader = []string{
-    "id", "created_at", "type", "username", "token_name", "model_name",
-    "channel", "channel_name", "prompt_tokens", "completion_tokens",
-    "quota", "use_time", "is_stream", "token_id", "group", "ip",
-    "request_id", "content",
-}
+缓存相关数据不在 `logs` 表的独立列上，而是序列化在 `Log.Other`（`model/log.go:80`，`string` 类型的 JSON）里，由 `service/log_info_generate.go` 在计费完成时写入。
+
+**用量字段**（`GenerateTextOtherInfo` / `GenerateClaudeOtherInfo`）：
+
+| 字段 | 含义 | 写入条件 |
+| --- | --- | --- |
+| `cache_tokens` | 缓存读取 tokens | 文本请求恒有 |
+| `cache_creation_tokens` | 缓存写入 tokens | Claude 语义 |
+| `cache_creation_tokens_5m` | 5 分钟缓存写入 tokens | 仅当非 0 |
+| `cache_creation_tokens_1h` | 1 小时缓存写入 tokens | 仅当非 0 |
+
+**倍率字段**：
+
+| 字段 | 含义 | 写入条件 |
+| --- | --- | --- |
+| `cache_ratio` | 缓存读取倍率 | 文本请求恒有 |
+| `cache_creation_ratio` | 缓存写入倍率 | Claude 语义 |
+| `cache_creation_ratio_5m` | 5 分钟缓存写入倍率 | 仅当对应 tokens 非 0 |
+| `cache_creation_ratio_1h` | 1 小时缓存写入倍率 | 仅当对应 tokens 非 0 |
+
+**计费基准字段**：`model_ratio`、`group_ratio`、`completion_ratio`、`model_price`、`user_group_ratio`，以及 Claude 语义标记 `claude`。
+
+关键性质：这些倍率是**计费时刻的历史快照**。后台修改模型倍率或汇率不会影响已落库的日志，因此用它们重算缓存花费是准确的，不会被后来的调价污染。
+
+## 缓存花费的推导
+
+计费公式见 `service/text_quota.go:285-357`。按倍率计费（非 `UsePrice`）时：
+
+```
+ratio = model_ratio × group_ratio
+
+cache_read_quota  = cache_tokens × cache_ratio × ratio
+
+cache_write_quota = cache_creation_tokens × cache_creation_ratio × ratio          （OpenAI 语义）
+                  = [(cache_creation_tokens − 5m − 1h) × cache_creation_ratio
+                     + 5m × cache_creation_ratio_5m
+                     + 1h × cache_creation_ratio_1h] × ratio                      （Claude 语义）
 ```
 
-**缺失的字段**（存储在 `Log.Other` JSON 中）：
-- `cache_tokens` - 缓存读取的 tokens（Claude 等大模型使用）
-- `cache_creation_tokens` - 缓存写入的 tokens
-- `cache_creation_tokens_5m` - 5分钟缓存写入 tokens
-- `cache_creation_tokens_1h` - 1小时缓存写入 tokens
+`group_ratio` 就是计费实际使用的倍率：`log_info_generate.go:477` 写入的是 `summary.GroupRatio`，而 `user_group_ratio` 存的是 `GroupRatioInfo.GroupSpecialRatio`，仅用于界面展示，不参与计算。因此重算时用 `group_ratio`，不要用 `user_group_ratio`。
 
-#### 2. **缓存字段的来源**
+quota 转 USD 沿用既有换算：`usd = quota / common.QuotaPerUnit`（`QuotaPerUnit = 500000`，即 `model_ratio = 1` 对应 $2/M tokens）。
 
-这些字段存储在 `Log.Other` 字段中，是一个 JSON 字符串，包含了大模型 API 返回的缓存相关信息。
+**缓存节省**表示这些缓存读取的 tokens 如果按普通输入价计费需要多花的钱：
 
-参考 commit `c01bbd00`（feat: logs cache field #2920），前端已经支持显示这些缓存字段，但 CSV 导出功能中没有包含。
-
-#### 3. **计费影响**
-
-根据 Anthropic 协议，Claude API 的计费规则：
-- `prompt_tokens` - 仅统计非缓存输入
-- `cache_tokens` - 缓存读取的 tokens（计费较低）
-- `cache_creation_tokens` - 缓存写入的 tokens（计费较高）
-
-这些字段对于准确的成本分析和计费至关重要。
-
-## 实现方案
-
-### 方案 1：直接在 CSV 导出中添加缓存字段（推荐）
-
-修改 `controller/log.go` 中的 CSV 导出逻辑，从 `Log.Other` JSON 中提取缓存字段：
-
-#### 步骤 1：更新 CSV 表头
-
-```go
-var logCSVHeader = []string{
-    "id", "created_at", "type", "username", "token_name", "model_name",
-    "channel", "channel_name", "prompt_tokens", "completion_tokens",
-    "quota", "use_time", "is_stream", "token_id", "group", "ip",
-    "request_id", "cache_tokens", "cache_creation_tokens",
-    "cache_creation_tokens_5m", "cache_creation_tokens_1h", "content",
-}
+```
+cache_saving_quota = cache_tokens × (1 − cache_ratio) × ratio
 ```
 
-#### 步骤 2：创建辅助函数解析缓存字段
+`cache_ratio < 1` 时为正（省钱），等于 1 时为 0。
 
-```go
-// extractCacheTokens 从 Log.Other JSON 中提取缓存相关字段
-func extractCacheTokens(otherStr string) (cacheTokens, cacheCreationTokens, cacheCreationTokens5m, cacheCreationTokens1h string) {
-    if otherStr == "" {
-        return "0", "0", "0", "0"
-    }
+## 导出列设计
 
-    var otherMap map[string]interface{}
-    if err := common.Unmarshal([]byte(otherStr), &otherMap); err != nil {
-        return "0", "0", "0", "0"
-    }
+在 `content` 列之前插入 12 列，保持 `content`（可能很长）仍在最后：
 
-    // 提取缓存字段，如果不存在则返回 "0"
-    cacheTokens = toString(otherMap["cache_tokens"], "0")
-    cacheCreationTokens = toString(otherMap["cache_creation_tokens"], "0")
-    cacheCreationTokens5m = toString(otherMap["cache_creation_tokens_5m"], "0")
-    cacheCreationTokens1h = toString(otherMap["cache_creation_tokens_1h"], "0")
+**语义标记**（1 列）：`usage_semantic` —— 取值 `anthropic` / `openai`，由 `Other.claude` 推导。
 
-    return
-}
+**用量**（4 列）：`cache_tokens`、`cache_creation_tokens`、`cache_creation_tokens_5m`、`cache_creation_tokens_1h`
 
-// toString 将 interface{} 转换为字符串
-func toString(v interface{}, defaultVal string) string {
-    if v == nil {
-        return defaultVal
-    }
-    switch val := v.(type) {
-    case string:
-        return val
-    case float64:
-        return strconv.FormatInt(int64(val), 10)
-    case int:
-        return strconv.Itoa(val)
-    default:
-        return defaultVal
-    }
-}
-```
+**倍率**（4 列）：`cache_ratio`、`cache_creation_ratio`、`cache_creation_ratio_5m`、`cache_creation_ratio_1h`
 
-#### 步骤 3：更新 logToCSVRow 函数
+**花费**（3 列）：`cache_read_usd`、`cache_write_usd`、`cache_saving_usd`
 
-```go
-func logToCSVRow(l *model.Log) []string {
-    isStream := "false"
-    if l.IsStream {
-        isStream = "true"
-    }
+花费只给 USD，不给 CNY：缓存单行金额比总额小一到两个数量级，CNY 需要 `6 + 汇率小数位` 位小数才能精确表示，6 位小数的相对舍入误差在小数值上更明显。需要人民币口径时，用 USD 列求和后再乘汇率，结果与总额换算一致。
 
-    cacheTokens, cacheCreationTokens, cacheCreationTokens5m, cacheCreationTokens1h := extractCacheTokens(l.Other)
+字段缺失时输出空字符串而非 `0`，`0` 会被误读成“确实发生了但为零”。
 
-    return []string{
-        strconv.Itoa(l.Id),
-        time.Unix(l.CreatedAt, 0).UTC().Format("2006-01-02 15:04:05"),
-        strconv.Itoa(l.Type),
-        l.Username,
-        l.TokenName,
-        l.ModelName,
-        strconv.Itoa(l.ChannelId),
-        l.ChannelName,
-        strconv.Itoa(l.PromptTokens),
-        strconv.Itoa(l.CompletionTokens),
-        strconv.Itoa(l.Quota),
-        strconv.Itoa(l.UseTime),
-        isStream,
-        strconv.Itoa(l.TokenId),
-        l.Group,
-        l.Ip,
-        l.RequestId,
-        cacheTokens,
-        cacheCreationTokens,
-        cacheCreationTokens5m,
-        cacheCreationTokens1h,
-        l.Content,
-    }
-}
-```
+## 准确性边界
 
-**优点**：
-- 简单直接，只需修改 CSV 导出逻辑
-- 不需要修改数据库或 Log 结构体
-- 充分利用现有的 `Log.Other` 字段
-- 改动最小，风险最低
-- 无需数据库迁移
-- 快速解决问题
+以下三点必须在实现中体现，否则导出数据会被误用。
 
-## 实现步骤
+**1. 缓存花费各项之和 ≠ `quota` 列。** 文本日志的 `Other` 没有落库 `other_ratios`（只有任务日志有，见 `model/task.go:120`），此外音频单价项（`audioInputQuota`）、工具调用附加费（`ToolCallSurchargeQuota`）、以及最终的“最小值 1”兜底和 `QuotaFromDecimalChecked` 的饱和截断都不在拆分范围内。因此这些列可以回答“缓存花了多少钱”，但**不能用于反推或对账总额**。若将来需要严格对账，前置条件是把 `other_ratios` 也写入日志 `Other`。
 
-1. 在 `controller/log.go` 中添加 `extractCacheTokens()` 和 `toString()` 函数
-2. 更新 `logCSVHeader` 变量
-3. 修改 `logToCSVRow()` 函数
-4. 测试 CSV 导出是否包含缓存字段
+**2. `prompt_tokens` 的含义随协议变化，直接与缓存列相加会重复计算。** OpenAI 语义下 `prompt_tokens` **包含** cached tokens，计费时要减去（`text_quota.go:308`）；Claude 语义下 `prompt_tokens` **不含**缓存部分。这是导出 `usage_semantic` 列的原因——让每一行自解释该不该相加。
+
+**3. 按次计费的请求没有缓存计费。** `model_price > 0` 表示走固定价格（判据与前端 `isPerCallBilling` 一致），此时缓存倍率不参与计算，倍率列与花费列必须留空。用量列照实导出，因为缓存调用确实发生了。
+
+## 实现要点
+
+1. `controller/log.go`：扩展 `logCSVHeader`，在 `content` 前插入上述 12 列。
+2. 新增缓存列的解析与重算逻辑，用 `common.StrToMap` 解析 `Other`（标准 `json.Unmarshal`，数字为 `float64`）。金额用 `shopspring/decimal` 计算避免浮点误差累积，输出格式与既有 `usd` 列一致（6 位小数）。
+3. 不新增数据库列、不做迁移，全部数据已在 `Other` 中。
+
+## 测试覆盖
+
+`controller/log_export_test.go` 需覆盖：
+
+- Claude 语义下 5m / 1h 拆分的缓存写入花费
+- OpenAI 语义下缓存写入花费（不拆分）
+- `cache_ratio < 1` 时的节省金额，以及 `= 1` 时节省为 0
+- `model_price > 0`（按次计费）时倍率列与花费列留空
+- `Other` 为空、非法 JSON、字段缺失时输出空字符串且行宽不变
