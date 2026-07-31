@@ -2445,6 +2445,7 @@
     "Expires in": "Expires in",
     "Export": "Export",
     "Export logs": "Export logs",
+    "Export CSV": "Export CSV",
     "Export snapshot": "Export snapshot",
     "Exported {{count}} logs": "Exported {{count}} logs",
     "Expose ratio API": "Expose ratio API",

@@ -2445,6 +2445,7 @@
     "Expires in": "Expire dans",
     "Export": "Exporter",
     "Export logs": "Exporter les journaux",
+    "Export CSV": "Exporter en CSV",
     "Export snapshot": "Exporter l’instantané",
     "Exported {{count}} logs": "{{count}} entrées exportées",
     "Expose ratio API": "Exposer l'API de ratio",

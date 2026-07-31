@@ -51,6 +51,7 @@ import type { CommonLogFilters } from '../types'
 import { CommonLogsStats } from './common-logs-stats'
 import { CompactDateTimeRangePicker } from './compact-date-time-range-picker'
 import { ExportLogsDialog } from './dialogs/export-logs-dialog'
+import { ExportLogsButton } from './export-logs-button'
 import {
   LogsFilterField,
   LogsFilterInput,
@@ -319,6 +320,13 @@ export function CommonLogsFilterBar<TData>(
     </Tooltip>
   )
 
+  const toolbarActions = (
+    <>
+      {isAdmin && <ExportLogsButton table={props.table} />}
+      {sensitiveToggle}
+    </>
+  )
+
   const dateRangeFilter = (
     <LogsFilterField wide>
       <CompactDateTimeRangePicker
@@ -489,7 +497,7 @@ export function CommonLogsFilterBar<TData>(
       table={props.table}
       compactMobile
       stats={statsBar}
-      actionStart={sensitiveToggle}
+      actionStart={toolbarActions}
       actionEnd={<ExportLogsDialog />}
       primaryFilters={
         <>
