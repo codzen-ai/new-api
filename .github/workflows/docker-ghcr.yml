@@ -2,15 +2,20 @@ name: Publish Docker image (GHCR)
 
 on:
   push:
-    branches: [production]
+    branches: [production, staging]
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: ghcr-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   docker:
+    name: Build and push image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -26,6 +31,63 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           push: true
+          # ref_name is the branch: staging or production
           tags: |
-            ghcr.io/${{ github.repository }}:production
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
             ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+
+  # staging only — production stays publish-only and is deployed by manually
+  # running "Deploy to Production" in codzen-ai/codzen-deployment.
+  deploy-staging:
+    name: Deploy to staging
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_REPO: codzen-ai/codzen-deployment
+      WORKFLOW: deploy-to-staging.yml
+      # Deploy the immutable sha tag, never the moving branch tag, so the
+      # running commit is always unambiguous and rollback is a one-line edit.
+      IMAGE_TAG: sha-${{ github.sha }}
+      GH_TOKEN: ${{ secrets.DEPLOY_PAT }}
+    steps:
+      - name: Trigger deployment
+        run: |
+          set -euo pipefail
+          echo "SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          gh api "repos/${DEPLOY_REPO}/dispatches" --input - <<EOF
+          {
+            "event_type": "deploy-staging",
+            "client_payload": { "service": "new-api", "tag": "${IMAGE_TAG}" }
+          }
+          EOF
+          echo "dispatched deploy-staging with tag ${IMAGE_TAG}"
+
+      - name: Wait for deployment to finish
+        run: |
+          set -euo pipefail
+          # repository_dispatch is fire-and-forget, so poll the deployment run.
+          # Without this the deploy could fail silently and this workflow stays green.
+          for _ in $(seq 1 60); do
+            sleep 10
+            run=$(gh run list -R "$DEPLOY_REPO" -w "$WORKFLOW" -e repository_dispatch -L 1 \
+              --json databaseId,status,conclusion,createdAt,url \
+              --jq '.[0] | "\(.createdAt)\t\(.status)\t\(.conclusion // "-")\t\(.url)"')
+            IFS=$'\t' read -r created status conclusion url <<< "$run"
+            if [[ "$created" < "$SINCE" ]]; then
+              echo "waiting for the deployment run to appear..."
+              continue
+            fi
+            if [ "$status" != "completed" ]; then
+              echo "deployment $status — $url"
+              continue
+            fi
+            if [ "$conclusion" = "success" ]; then
+              echo "deployment succeeded — $url"
+              exit 0
+            fi
+            echo "::error::deployment $conclusion — $url"
+            exit 1
+          done
+          echo "::error::timed out after 10m waiting for ${WORKFLOW} in ${DEPLOY_REPO}"
+          exit 1
