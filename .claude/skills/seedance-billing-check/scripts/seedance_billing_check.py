@@ -277,7 +277,10 @@ def preflight(client, model, cases, seconds, usd_rate_override):
 def submit(client, model, case, seconds, video_url):
     metadata = {"resolution": case["resolution"]}
     if case["has_video"]:
-        metadata["content"] = [{"type": "video_url", "video_url": {"url": video_url}}]
+        # 上游要求参考视频显式带 role=reference_video，否则 400 InvalidParameter
+        metadata["content"] = [
+            {"type": "video_url", "video_url": {"url": video_url}, "role": "reference_video"}
+        ]
     body = {"model": model, "prompt": PROMPT, "seconds": str(seconds), "metadata": metadata}
     resp = client.relay_post("/v1/video/generations", body)
     task_id = resp.get("task_id") or resp.get("id")
@@ -286,13 +289,20 @@ def submit(client, model, case, seconds, video_url):
     return task_id, resp
 
 
+TERMINAL_OK = ("completed", "succeeded", "success")
+TERMINAL_FAIL = ("failed", "failure", "error")
+
+
 def poll_video(client, task_id, timeout, interval=10):
     deadline = time.time() + timeout
     last = {}
     while time.time() < deadline:
-        last = client.relay_get(f"/v1/video/generations/{task_id}")
-        status = last.get("status")
-        if status in ("completed", "failed"):
+        payload = client.relay_get(f"/v1/video/generations/{task_id}")
+        # 实例把任务体裹在 {"code":..., "data":{...}} 信封里，状态是大写的 SUCCESS/FAILURE
+        last = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        status = (last.get("status") or "").lower()
+        if status in TERMINAL_OK or status in TERMINAL_FAIL:
+            last["_failed"] = status in TERMINAL_FAIL
             return last
         time.sleep(interval)
     last["_timeout"] = True
@@ -356,12 +366,16 @@ def run_case(client, model, case, seconds, ctx, video_url, poll_timeout, settle_
 
     video = poll_video(client, task_id, poll_timeout)
     result["video_status"] = video.get("status")
-    result["video_url"] = (video.get("metadata") or {}).get("url")
+    result["video_url"] = (
+        video.get("result_url")
+        or ((video.get("data") or {}).get("content") or {}).get("video_url")
+        or (video.get("metadata") or {}).get("url")
+    )
     if video.get("_timeout"):
         result["outcome"] = "timeout"
         result["note"] = f"轮询 {poll_timeout}s 未终态，最后状态 {video.get('status')}"
         return result
-    if video.get("status") == "failed":
+    if video.get("_failed"):
         result["outcome"] = "failed"
         result["note"] = json.dumps(video.get("error") or {}, ensure_ascii=False)
         return result
