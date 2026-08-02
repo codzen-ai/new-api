@@ -158,49 +158,104 @@ func GetLogsSelfStat(c *gin.Context) {
 
 const logExportMaxCount = 100_000
 
+// The export is a customer-facing reconciliation statement, so it carries only
+// what a customer needs to verify a charge. Channel, IP and request content are
+// deliberately absent: they expose upstream routing and the customer's own
+// traffic, neither of which belongs on an invoice.
+//
+// Every row is self-checking:
+//
+//	input + cache_read + cache_write + output + other = total
+//
+// Prices are per 1M tokens, in the currency the site displays elsewhere, so the
+// figures match what the customer sees in the web UI.
 var logCSVHeader = []string{
-	"id", "created_at", "type", "username", "token_name", "model_name",
-	"channel", "channel_name", "prompt_tokens", "completion_tokens",
-	"quota", "usd", "cny", "use_time", "is_stream", "token_id", "group", "ip",
-	"request_id", "usage_semantic",
-	"cache_tokens", "cache_creation_tokens", "cache_creation_tokens_5m", "cache_creation_tokens_1h",
-	"cache_ratio", "cache_creation_ratio", "cache_creation_ratio_5m", "cache_creation_ratio_1h",
-	"cache_read_usd", "cache_write_usd", "cache_saving_usd",
-	"content",
+	"time", "request_id", "username", "token_name", "model", "billing_mode",
+	"input_tokens", "input_price_per_1m", "input_amount",
+	"cache_read_tokens", "cache_read_price_per_1m", "cache_read_amount",
+	"cache_write_tokens", "cache_write_price_per_1m", "cache_write_amount",
+	"output_tokens", "output_price_per_1m", "output_amount",
+	"other_amount", "total_amount", "currency", "exchange_rate",
 }
-
-// logCacheColumnCount is the number of columns produced by logCacheColumns,
-// covering the usage semantic marker, cache token counts, cache ratios and the
-// recomputed cache spend.
-const logCacheColumnCount = 12
 
 // logExportTimeZone is the fixed UTC+8 zone used to render exported timestamps.
 var logExportTimeZone = time.FixedZone("UTC+8", 8*60*60)
 
-// logCacheColumns derives the cache usage, cache ratios and cache spend columns
-// from a log's Other payload, which is where the billing pipeline records them
-// (see service/log_info_generate.go).
-//
-// The ratios stored there are a snapshot taken at billing time, so recomputing
-// spend from them stays correct even after the model ratios are later changed.
-// Spend follows service/text_quota.go: cache tokens are charged at
-// cache_ratio × model_ratio × group_ratio, and Claude splits cache writes into
-// 5m/1h buckets with their own ratios. group_ratio is the ratio billing
-// actually applied; user_group_ratio is display-only and must not be used here.
-//
-// Missing values are rendered as an empty string rather than "0", so that a
-// field the provider never reported is not mistaken for a measured zero. Callers
-// get exactly logCacheColumnCount values regardless of the payload.
-func logCacheColumns(otherStr string) []string {
-	cols := make([]string, logCacheColumnCount)
-	if otherStr == "" {
-		return cols
-	}
-	other, err := common.StrToMap(otherStr)
-	if err != nil || other == nil {
-		return cols
-	}
+// tokensPerPriceUnit is the token count prices are quoted per, matching how
+// upstream providers publish their price lists.
+var tokensPerPriceUnit = decimal.NewFromInt(1_000_000)
 
+// exportCurrency resolves the currency the statement is denominated in and the
+// USD conversion rate, mirroring how the site displays money everywhere else so
+// a statement reconciles against the web UI. A site displaying raw tokens has no
+// currency to bill in, so it falls back to USD.
+func exportCurrency() (string, decimal.Decimal) {
+	rate := decimal.NewFromFloat(operation_setting.GetUsdToCurrencyRate(operation_setting.USDExchangeRate))
+	switch operation_setting.GetQuotaDisplayType() {
+	case operation_setting.QuotaDisplayTypeCNY:
+		return "CNY", rate
+	case operation_setting.QuotaDisplayTypeCustom:
+		return operation_setting.GetCurrencySymbol(), rate
+	default:
+		return "USD", decimal.NewFromInt(1)
+	}
+}
+
+// logBillingColumnCount is the number of columns produced by logBillingColumns:
+// the billing mode, four token/price/amount triples, and the other and total
+// amounts.
+const logBillingColumnCount = 15
+
+// Column offsets within the slice logBillingColumns returns.
+const (
+	colBillingMode = iota
+	colInputTokens
+	colInputPrice
+	colInputAmount
+	colCacheReadTokens
+	colCacheReadPrice
+	colCacheReadAmount
+	colCacheWriteTokens
+	colCacheWritePrice
+	colCacheWriteAmount
+	colOutputTokens
+	colOutputPrice
+	colOutputAmount
+	colOtherAmount
+	colTotalAmount
+)
+
+// logBillingColumns splits a log's charge into the components a customer can
+// verify, using the ratios the billing pipeline snapshotted at request time
+// (see service/log_info_generate.go). Reading the snapshot rather than current
+// settings keeps historical statements stable when model ratios later change.
+//
+// The split follows service/text_quota.go. Two details matter for a statement:
+//
+//   - What counts as an input token depends on the upstream's usage semantics.
+//     OpenAI reports cached tokens inside prompt_tokens, Anthropic reports them
+//     alongside. Exporting prompt_tokens raw would mean the column's meaning
+//     changed from row to row, so it is normalised here into the tokens actually
+//     charged at the input price.
+//   - other_amount is derived by subtraction, not by adding up the remaining fee
+//     types. Image, audio, tool-call surcharges, per-call pricing and settlement
+//     rounding all land there automatically, which keeps the row's components
+//     summing to the authoritative total no matter what produced the charge.
+//
+// When the ratios are missing — old logs, or per-call pricing where token ratios
+// do not apply — the breakdown is left empty and the whole charge is reported as
+// other_amount. An empty cell means "not applicable here", never a measured zero.
+func logBillingColumns(l *model.Log, rate decimal.Decimal) []string {
+	cols := make([]string, logBillingColumnCount)
+	totalQuota := decimal.NewFromInt(int64(l.Quota))
+	cols[colTotalAmount] = quotaToAmount(totalQuota, rate)
+
+	other := map[string]any{}
+	if l.Other != "" {
+		if parsed, err := common.StrToMap(l.Other); err == nil && parsed != nil {
+			other = parsed
+		}
+	}
 	number := func(key string) (decimal.Decimal, bool) {
 		value, ok := other[key].(float64)
 		if !ok {
@@ -208,117 +263,119 @@ func logCacheColumns(otherStr string) []string {
 		}
 		return decimal.NewFromFloat(value), true
 	}
-	tokens := func(key string) string {
-		value, ok := number(key)
-		if !ok {
-			return ""
-		}
-		return value.String()
-	}
 
-	isClaude, _ := other["claude"].(bool)
-	if isClaude {
-		cols[0] = "anthropic"
-	} else {
-		cols[0] = "openai"
-	}
-
-	cols[1] = tokens("cache_tokens")
-	cols[2] = tokens("cache_creation_tokens")
-	cols[3] = tokens("cache_creation_tokens_5m")
-	cols[4] = tokens("cache_creation_tokens_1h")
-
-	// Per-call pricing ignores token ratios entirely, so emitting ratios or a
-	// recomputed spend for those rows would be fabricated. Usage above still
-	// reflects the cache traffic that really happened.
+	perCall := false
 	if modelPrice, ok := number("model_price"); ok && modelPrice.IsPositive() {
-		return cols
+		perCall = true
 	}
-
-	cols[5] = tokens("cache_ratio")
-	cols[6] = tokens("cache_creation_ratio")
-	cols[7] = tokens("cache_creation_ratio_5m")
-	cols[8] = tokens("cache_creation_ratio_1h")
+	cols[colBillingMode] = "per_token"
+	if perCall {
+		cols[colBillingMode] = "per_call"
+	}
 
 	modelRatio, hasModelRatio := number("model_ratio")
 	groupRatio, hasGroupRatio := number("group_ratio")
-	if !hasModelRatio || !hasGroupRatio {
+	if perCall || !hasModelRatio || !hasGroupRatio {
+		cols[colOtherAmount] = quotaToAmount(totalQuota, rate)
 		return cols
 	}
-	ratio := modelRatio.Mul(groupRatio)
+	// quotaPerInputToken is what one plain input token costs; every other
+	// component is that price scaled by its own ratio.
+	quotaPerInputToken := modelRatio.Mul(groupRatio)
 
-	cacheTokens, hasCacheTokens := number("cache_tokens")
-	cacheRatio, hasCacheRatio := number("cache_ratio")
-	if hasCacheTokens && hasCacheRatio {
-		cols[9] = quotaToUSDString(cacheTokens.Mul(cacheRatio).Mul(ratio))
-		saving := cacheTokens.Mul(decimal.NewFromInt(1).Sub(cacheRatio)).Mul(ratio)
-		cols[11] = quotaToUSDString(saving)
+	cacheReadTokens, _ := number("cache_tokens")
+	cacheReadRatio, hasCacheReadRatio := number("cache_ratio")
+	writeTokens, _ := number("cache_creation_tokens")
+	writeRatio, hasWriteRatio := number("cache_creation_ratio")
+	imageTokens, _ := number("image_output")
+	audioTokens, _ := number("audio_input_token_count")
+
+	// Anthropic reports cache traffic outside prompt_tokens; OpenAI reports it
+	// inside. Image and audio tokens are always carved out of prompt_tokens.
+	inputTokens := decimal.NewFromInt(int64(l.PromptTokens))
+	if _, isClaude := other["claude"].(bool); !isClaude {
+		inputTokens = inputTokens.Sub(cacheReadTokens).Sub(writeTokens)
+	}
+	inputTokens = inputTokens.Sub(imageTokens).Sub(audioTokens)
+	if inputTokens.IsNegative() {
+		inputTokens = decimal.Zero
 	}
 
-	creationTokens, hasCreationTokens := number("cache_creation_tokens")
-	creationRatio, hasCreationRatio := number("cache_creation_ratio")
-	tokens5m, has5m := number("cache_creation_tokens_5m")
-	tokens1h, has1h := number("cache_creation_tokens_1h")
-	if hasCreationTokens && hasCreationRatio {
-		var writeQuota decimal.Decimal
-		if isClaude && (has5m || has1h) {
+	inputQuota := inputTokens.Mul(quotaPerInputToken)
+	cols[colInputTokens] = inputTokens.String()
+	cols[colInputPrice] = pricePerUnit(decimal.NewFromInt(1), quotaPerInputToken, rate)
+	cols[colInputAmount] = quotaToAmount(inputQuota, rate)
+
+	var cacheReadQuota decimal.Decimal
+	if hasCacheReadRatio && cacheReadTokens.IsPositive() {
+		cacheReadQuota = cacheReadTokens.Mul(cacheReadRatio).Mul(quotaPerInputToken)
+		cols[colCacheReadTokens] = cacheReadTokens.String()
+		cols[colCacheReadPrice] = pricePerUnit(cacheReadRatio, quotaPerInputToken, rate)
+		cols[colCacheReadAmount] = quotaToAmount(cacheReadQuota, rate)
+	}
+
+	var cacheWriteQuota decimal.Decimal
+	if hasWriteRatio && writeTokens.IsPositive() {
+		// Claude prices 5m and 1h cache writes differently, so the row reports
+		// the blended rate the customer actually paid across both buckets.
+		tokens5m, _ := number("cache_creation_tokens_5m")
+		tokens1h, _ := number("cache_creation_tokens_1h")
+		weighted := writeTokens.Mul(writeRatio)
+		if tokens5m.IsPositive() || tokens1h.IsPositive() {
 			ratio5m, _ := number("cache_creation_ratio_5m")
 			ratio1h, _ := number("cache_creation_ratio_1h")
-			remaining := creationTokens.Sub(tokens5m).Sub(tokens1h)
+			remaining := writeTokens.Sub(tokens5m).Sub(tokens1h)
 			if remaining.IsNegative() {
 				remaining = decimal.Zero
 			}
-			writeQuota = remaining.Mul(creationRatio).
+			weighted = remaining.Mul(writeRatio).
 				Add(tokens5m.Mul(ratio5m)).
 				Add(tokens1h.Mul(ratio1h))
-		} else {
-			writeQuota = creationTokens.Mul(creationRatio)
 		}
-		cols[10] = quotaToUSDString(writeQuota.Mul(ratio))
+		cacheWriteQuota = weighted.Mul(quotaPerInputToken)
+		cols[colCacheWriteTokens] = writeTokens.String()
+		cols[colCacheWritePrice] = pricePerUnit(weighted.Div(writeTokens), quotaPerInputToken, rate)
+		cols[colCacheWriteAmount] = quotaToAmount(cacheWriteQuota, rate)
 	}
 
+	outputTokens := decimal.NewFromInt(int64(l.CompletionTokens))
+	completionRatio, hasCompletionRatio := number("completion_ratio")
+	var outputQuota decimal.Decimal
+	if hasCompletionRatio {
+		outputQuota = outputTokens.Mul(completionRatio).Mul(quotaPerInputToken)
+		cols[colOutputTokens] = outputTokens.String()
+		cols[colOutputPrice] = pricePerUnit(completionRatio, quotaPerInputToken, rate)
+		cols[colOutputAmount] = quotaToAmount(outputQuota, rate)
+	}
+
+	accounted := inputQuota.Add(cacheReadQuota).Add(cacheWriteQuota).Add(outputQuota)
+	cols[colOtherAmount] = quotaToAmount(totalQuota.Sub(accounted), rate)
 	return cols
 }
 
-// quotaToUSDString converts a quota amount to the dollar figure shown in the
-// export, matching the precision of the existing usd column.
-func quotaToUSDString(quota decimal.Decimal) string {
-	usd := quota.Div(decimal.NewFromFloat(common.QuotaPerUnit))
-	return usd.StringFixed(6)
+// pricePerUnit renders what one million tokens of a component cost, where ratio
+// is the component's multiplier over the plain input price.
+func pricePerUnit(ratio, quotaPerInputToken, rate decimal.Decimal) string {
+	return quotaToAmount(ratio.Mul(quotaPerInputToken).Mul(tokensPerPriceUnit), rate)
 }
 
-func logToCSVRow(l *model.Log) []string {
-	isStream := "false"
-	if l.IsStream {
-		isStream = "true"
-	}
-	usd := float64(l.Quota) / common.QuotaPerUnit
-	cny := usd * operation_setting.USDExchangeRate
+// quotaToAmount converts a quota amount into the statement's currency.
+func quotaToAmount(quota, rate decimal.Decimal) string {
+	return quota.Div(decimal.NewFromFloat(common.QuotaPerUnit)).Mul(rate).StringFixed(6)
+}
+
+func logToCSVRow(l *model.Log, currency string, rate decimal.Decimal) []string {
 	row := []string{
-		strconv.Itoa(l.Id),
 		time.Unix(l.CreatedAt, 0).In(logExportTimeZone).Format("2006-01-02 15:04:05"),
-		strconv.Itoa(l.Type),
+		l.RequestId,
 		l.Username,
 		l.TokenName,
 		l.ModelName,
-		strconv.Itoa(l.ChannelId),
-		l.ChannelName,
-		strconv.Itoa(l.PromptTokens),
-		strconv.Itoa(l.CompletionTokens),
-		strconv.Itoa(l.Quota),
-		strconv.FormatFloat(usd, 'f', 6, 64),
-		strconv.FormatFloat(cny, 'f', 6, 64),
-		strconv.Itoa(l.UseTime),
-		isStream,
-		strconv.Itoa(l.TokenId),
-		l.Group,
-		l.Ip,
-		l.RequestId,
 	}
-	row = append(row, logCacheColumns(l.Other)...)
-	// content goes last because it can be long enough to make the trailing
-	// columns hard to read in a spreadsheet.
-	return append(row, l.Content)
+	row = append(row, logBillingColumns(l, rate)...)
+	// The rate is repeated on every row so a single row is enough to re-derive
+	// the amounts, without the reader having to look elsewhere for the basis.
+	return append(row, currency, rate.String())
 }
 
 func ExportAllLogs(c *gin.Context) {
@@ -343,15 +400,24 @@ func ExportAllLogs(c *gin.Context) {
 		return
 	}
 
-	filename := fmt.Sprintf("logs_%s.csv", time.Now().In(logExportTimeZone).Format("20060102_150405"))
+	filename := fmt.Sprintf("statement_%s.csv", time.Now().In(logExportTimeZone).Format("20060102_150405"))
 	c.Header("Content-Type", "text/csv; charset=utf-8")
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	c.Header("Transfer-Encoding", "chunked")
 	c.Header("X-Accel-Buffering", "no")
 	c.Status(http.StatusOK)
 
+	// Excel assumes the system codepage for CSV unless the file starts with a
+	// UTF-8 BOM, which would garble non-ASCII usernames and model names in the
+	// spreadsheet a customer actually opens.
+	_, _ = c.Writer.WriteString("\ufeff")
+
 	w := csv.NewWriter(c.Writer)
 	_ = w.Write(logCSVHeader)
+
+	// Resolve the currency once so every row in a file shares one basis, even if
+	// an admin changes the rate while the export is still streaming.
+	currency, rate := exportCurrency()
 
 	err = model.StreamAllLogsForExport(
 		logType, startTimestamp, endTimestamp,
@@ -360,7 +426,7 @@ func ExportAllLogs(c *gin.Context) {
 		1000,
 		func(logs []*model.Log) error {
 			for _, l := range logs {
-				if err := w.Write(logToCSVRow(l)); err != nil {
+				if err := w.Write(logToCSVRow(l, currency, rate)); err != nil {
 					return err
 				}
 			}
