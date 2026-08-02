@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(*)",
+      "Bash",
+      "mcp__linear-codzen__*",
       "Edit(/.claude/skills/rebase-production/**)"
     ]
   }
