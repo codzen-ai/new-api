@@ -93,6 +93,8 @@ New API 用「模型倍率 + 相对倍率」表达官方的绝对单价表。
 | 1080p 无视频输入 | 245,025 | 1.1087 | 814,974 | 814,974 | 通过 |
 | 480p 含视频输入 | 100,858 | 0.6087 | 184,175 | 184,175 | 通过 |
 
+复现方式见下方[「怎么自己跑一遍」](#怎么自己跑一遍)，四个用例的原始请求与原始响应都在那一节。
+
 四档零误差。已验证的结论：
 
 - **差额结算链路正常**。实际扣费远高于预扣占位，说明异步结算确实触发。
@@ -121,21 +123,220 @@ New API 用「模型倍率 + 相对倍率」表达官方的绝对单价表。
 - **2.0-fast / 2.0-mini / 2.5 / 1.5-pro** 型号。其中 1.5-pro 按输出视频有声无声区分定价，另有 draft 模式的 token 折算系数（无声 0.7、有声 0.6），计费逻辑与 2.0 不同
 - 非 16:9 宽高比、非 5 秒时长、非 24fps
 
-## 复测方式
+## 怎么自己跑一遍
 
-项目内置了 skill `seedance-billing-check`，对已部署实例发真实付费调用并自动对账：
+这一节是上面那张结论表的完整复现步骤。**每跑一个用例都会真实花钱**，480p 约 ¥2.3、720p 约 ¥5、1080p 约 ¥12.4、4K 约 ¥25。想只花 ¥5 验证核心逻辑，跑 480p 和「480p 含视频输入」两个用例即可。
+
+下面的响应都是 2026-08-02 那轮实测抓到的原样内容，只把视频链接的签名参数省略了。
+
+### 准备
+
+两个凭据，别混用（混用会得到一个含义不明的 401）：
+
+| 凭据 | 从哪来 | 用途 |
+|---|---|---|
+| 中转 API key（`sk-` 开头） | 后台「令牌」页新建 | 提交任务、查任务 |
+| 管理员访问令牌 | 后台「个人设置 → 访问令牌」 | 查实际扣费、查日志 |
 
 ```bash
-# 预检，不花钱
-python3 .claude/skills/seedance-billing-check/scripts/seedance_billing_check.py --dry-run
-
-# 实跑
-python3 .claude/skills/seedance-billing-check/scripts/seedance_billing_check.py --yes
+export BASE=https://你的实例地址          # 不要带尾斜杠
+export KEY=sk-xxxx                        # 中转 API key
+export ADMIN=xxxx                         # 管理员访问令牌
+export MODEL=doubao-seedance-2-0-260128
 ```
 
-需要三个环境变量：`NEW_API_BASE_URL`、`NEW_API_KEY`（中转令牌）、`NEW_API_ADMIN_TOKEN`（管理员访问令牌）。默认档位 `480p,720p,1080p,video-480p` 一轮约 ¥20。详见 [.claude/skills/seedance-billing-check/SKILL.md](../.claude/skills/seedance-billing-check/SKILL.md)。
+开跑前先在后台确认三件事，任何一条不满足，测出来的数都没有意义：
 
-**注意**：该脚本的 `token_field` 断言在上游返回两个 token 字段相等时不具备区分能力，通过不等于代码读对了字段。
+1. **有一个启用状态的渠道**能提供该模型。停用的渠道不会报「渠道停用」，而是报模型不存在，容易误判。
+2. **该模型配了「模型倍率」**，且**没有**配「模型固定价格」。配了固定价格会退化成按次收费，token 结算被整体跳过。
+3. 记下当前的**模型倍率**、**分组倍率**、**汇率**，复算要用。
+
+### 第 1 步：提交任务
+
+无视频输入（480p / 720p / 1080p / 4k 只改 `resolution`）：
+
+```bash
+curl -s -X POST "$BASE/v1/video/generations" \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "doubao-seedance-2-0-260128",
+    "prompt": "a calm ocean wave rolling onto an empty beach at sunrise, slow camera pan",
+    "seconds": "5",
+    "metadata": { "resolution": "480p" }
+  }'
+```
+
+含视频输入，在 `metadata.content` 里挂一个参考视频。**`role` 必须是 `reference_video`**：
+
+```bash
+curl -s -X POST "$BASE/v1/video/generations" \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "doubao-seedance-2-0-260128",
+    "prompt": "a calm ocean wave rolling onto an empty beach at sunrise, slow camera pan",
+    "seconds": "5",
+    "metadata": {
+      "resolution": "480p",
+      "content": [
+        {
+          "type": "video_url",
+          "video_url": { "url": "https://公网可访问的.mp4" },
+          "role": "reference_video"
+        }
+      ]
+    }
+  }'
+```
+
+参考视频可以直接用上一个用例产出的视频 URL（火山返回的链接 24 小时内有效）。漏掉 `role` 会被上游拒绝，实测拿到的原始报错：
+
+```json
+{
+  "code": "fail_to_fetch_task",
+  "message": "{\"error\":{\"code\":\"InvalidParameter\",\"message\":\"The parameter `content` specified in the request is not valid: reference media mode requires video role to be reference_video.\",\"param\":\"content\",\"type\":\"BadRequest\"}}",
+  "data": null
+}
+```
+
+提交成功的响应**顶层直接带 `task_id`**，记下它，后面每一步都要用。
+
+### 第 2 步：轮询到终态
+
+```bash
+curl -s -H "Authorization: Bearer $KEY" "$BASE/v1/video/generations/$TASK_ID"
+```
+
+**终态是大写的 `SUCCESS` / `FAILURE`**，不是 OpenAI 风格的 `completed` / `failed`；任务体裹在 `data` 信封里，不在顶层。写轮询脚本时这两点最容易踩坑——实测第一轮就是因为读顶层小写状态，四个用例全部空转到 900 秒超时，钱花了但结论没拿到。
+
+5 秒视频通常 3-4 分钟出结果。以「480p 含视频输入」用例为例，实测原始响应：
+
+```json
+{
+  "code": "success",
+  "message": "",
+  "data": {
+    "id": 47,
+    "task_id": "task_To0oAtJorNK2Zm8Wg9hYvMTMMHUx6FlX",
+    "platform": "54",
+    "group": "default",
+    "channel_id": 1,
+    "quota": 184175,
+    "action": "generate",
+    "status": "SUCCESS",
+    "fail_reason": "",
+    "result_url": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedance-2-0/0217856800062...mp4?<签名参数已省略>",
+    "submit_time": 1785680006,
+    "start_time": 1785680019,
+    "finish_time": 1785680214,
+    "progress": "100%",
+    "properties": {
+      "upstream_model_name": "doubao-seedance-2-0-260128",
+      "origin_model_name": "doubao-seedance-2-0-260128"
+    },
+    "data": {
+      "id": "cgt-20260802221320-zjbjt",
+      "model": "doubao-seedance-2-0-260128",
+      "status": "succeeded",
+      "resolution": "480p",
+      "ratio": "16:9",
+      "duration": 5,
+      "framespersecond": 24,
+      "generate_audio": true,
+      "draft": false,
+      "seed": 75103,
+      "content": { "video_url": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/...mp4?<签名参数已省略>" },
+      "usage": {
+        "completion_tokens": 100858,
+        "total_tokens": 100858
+      }
+    }
+  }
+}
+```
+
+这个响应里有对账需要的全部东西：
+
+- `data.data.usage.completion_tokens` = **上游认定的 token 用量**，官方计费以它为准
+- `data.quota` = **实例实际扣的额度**（差额结算后的最终值）
+- `data.data.resolution` / `duration` / `framespersecond` = 复算公式要用的参数
+
+如果 `data.data.usage` 是空的，说明上游没返回用量，扣费会停留在预扣的小额——这本身是个严重问题，不要当成「测试通过」。
+
+### 第 3 步：复算并比对
+
+```
+应扣额度 = floor(completion_tokens × 模型倍率 × 分组倍率 × video_input 倍率)
+```
+
+`video_input` 倍率查[上面那张表](#价格表与相对倍率)：无视频输入的 480p/720p 是 1.0，1080p 是 1.1087，含视频输入的 480p 是 0.6087。
+
+四个用例的实测算式（模型倍率 3.0、分组倍率 1.0）：
+
+| 用例 | 算式 | 复算 | `data.quota` 实际 |
+|---|---|---|---|
+| 480p | `floor(50638 × 3 × 1 × 1)` | 151,914 | 151,914 |
+| 720p | `floor(108900 × 3 × 1 × 1)` | 326,700 | 326,700 |
+| 1080p | `floor(245025 × 3 × 1 × 1.1087)` | 814,974 | 814,974 |
+| 480p 含视频输入 | `floor(100858 × 3 × 1 × 0.6087)` | 184,175 | 184,175 |
+
+两边相等即计费正确。不相等时按这个顺序查：`video_input` 倍率是否生效（对比 1080p 和 480p 的单价比）→ 模型倍率是否配在基准档 → 差额结算是否触发（见下一步）。
+
+想再核一遍官方人民币金额：`completion_tokens ÷ 1,000,000 × 官方单价`。480p 含视频输入即 `100858 ÷ 1e6 × 28 = ¥2.82`。实例扣的额度换算人民币是 `额度 ÷ 500000 × 汇率`，即 `184175 ÷ 500000 × 7 = ¥2.58`，比官方低 8.7%——这是模型倍率配 3.0 而非 3.2857 带来的折扣，全档位一致。
+
+### 第 4 步：核对日志（这一步容易看错）
+
+在**用量日志**页面按时间筛出这几笔，会看到**每个任务有两条记录**：
+
+| 类型 | 记的是什么 | 480p 那笔 |
+|---|---|---|
+| 消费 | **提交时的预扣额度**，不是最终扣费 | 750,000 |
+| 退款 | 差额结算退还的部分 | 598,086 |
+
+净额 `750000 − 598086 = 151914`，才等于实际扣费。实测四笔：
+
+| 用例 | 消费（预扣） | 退款（差额） | 净额 = 实际扣费 |
+|---|---|---|---|
+| 480p | 750,000 | 598,086 | 151,914 |
+| 720p | 750,000 | 423,300 | 326,700 |
+| 1080p | 831,521 | 16,547 | 814,974 |
+| 480p 含视频输入 | 456,521 | 272,346 | 184,175 |
+
+**只看「消费」类型会严重高估**，480p 那笔会看成 750,000（是实际的 4.9 倍）。这一点在导出[用量对账单](log-export-statement.md)时尤其要注意——对账单默认按「消费」类型筛选，Seedance 这类异步任务的行会显示预扣额度而非最终扣费。给客户出账单前务必确认净额。
+
+预扣额度本身的算法是 `模型倍率 ÷ 2 × 500000 × 分组倍率 × video_input 倍率`，所以 480p/720p 都是 750,000（`3 ÷ 2 × 500000`），1080p 是 `750000 × 1.1087 = 831521`。
+
+退款日志的 `content` 字段会把结算参数写全，可以直接看到实例用的 token 数和各项倍率：
+
+```
+token重算：tokens=100858, modelRatio=3.00, groupRatio=1.00, otherMultiplier=0.6087
+```
+
+**这条是判断计费是否正确最直接的证据**，比任何推断都可靠。
+
+### 第 5 步：确认总额对得上
+
+跑之前和跑之后各记一次用户余额，减少量应当精确等于各用例实际扣费之和。实测那轮三个用例合计 `151914 + 326700 + 814974 = 1293588`，与余额减少量完全一致，说明没有额度泄漏或重复扣费。
+
+### 用脚本自动跑
+
+上面五步已经封装成 skill `seedance-billing-check`，会自动完成提交、轮询、等结算落库、复算、比对，并输出逐用例的 PASS/FAIL：
+
+```bash
+# 预检，不花钱：检查模型是否按量计费、倍率是否配在基准档、余额是否够、本轮预计花多少
+python3 .claude/skills/seedance-billing-check/scripts/seedance_billing_check.py --dry-run
+
+# 实跑，默认 480p,720p,1080p,video-480p 四档，约 ¥20
+python3 .claude/skills/seedance-billing-check/scripts/seedance_billing_check.py --yes
+
+# 只跑最小集，约 ¥5
+python3 .claude/skills/seedance-billing-check/scripts/seedance_billing_check.py --yes --cases 480p,video-480p
+```
+
+需要三个环境变量：`NEW_API_BASE_URL`、`NEW_API_KEY`、`NEW_API_ADMIN_TOKEN`。详见 [.claude/skills/seedance-billing-check/SKILL.md](../.claude/skills/seedance-billing-check/SKILL.md)。
+
+**注意**：脚本的 `token_field` 断言在上游返回的两个 token 字段相等时不具备区分能力，通过不等于代码读对了字段（原因见[上一节](#一个已知的潜伏风险)）。
 
 ## 参考文档
 
