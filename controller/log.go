@@ -1,15 +1,18 @@
 package controller
 
 import (
+	"encoding/base64"
 	"encoding/csv"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	i18n "github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
@@ -170,12 +173,12 @@ const logExportMaxCount = 100_000
 // Prices are per 1M tokens, in the currency the site displays elsewhere, so the
 // figures match what the customer sees in the web UI.
 var logCSVHeader = []string{
-	"time", "request_id", "username", "token_name", "model", "billing_mode",
+	"time", "request_id", "username", "token_name", "model", "billing_mode", "tier",
 	"input_tokens", "input_price_per_1m", "input_amount",
 	"cache_read_tokens", "cache_read_price_per_1m", "cache_read_amount",
 	"cache_write_tokens", "cache_write_price_per_1m", "cache_write_amount",
 	"output_tokens", "output_price_per_1m", "output_amount",
-	"other_amount", "total_amount", "currency", "exchange_rate",
+	"other_amount", "calculation", "total_amount", "currency", "exchange_rate",
 }
 
 // logExportTimeZone is the fixed UTC+8 zone used to render exported timestamps.
@@ -202,13 +205,14 @@ func exportCurrency() (string, decimal.Decimal) {
 }
 
 // logBillingColumnCount is the number of columns produced by logBillingColumns:
-// the billing mode, four token/price/amount triples, and the other and total
-// amounts.
-const logBillingColumnCount = 15
+// the billing mode and tier, four token/price/amount triples, the other and
+// total amounts, and the arithmetic tying them together.
+const logBillingColumnCount = 17
 
 // Column offsets within the slice logBillingColumns returns.
 const (
 	colBillingMode = iota
+	colTier
 	colInputTokens
 	colInputPrice
 	colInputAmount
@@ -222,6 +226,7 @@ const (
 	colOutputPrice
 	colOutputAmount
 	colOtherAmount
+	colCalculation
 	colTotalAmount
 )
 
@@ -264,18 +269,33 @@ func logBillingColumns(l *model.Log, rate decimal.Decimal) []string {
 		return decimal.NewFromFloat(value), true
 	}
 
-	perCall := false
-	if modelPrice, ok := number("model_price"); ok && modelPrice.IsPositive() {
-		perCall = true
-	}
 	cols[colBillingMode] = "per_token"
-	if perCall {
+	if modelPrice, ok := number("model_price"); ok && modelPrice.IsPositive() {
 		cols[colBillingMode] = "per_call"
+		cols[colOtherAmount] = quotaToAmount(totalQuota, rate)
+		return cols
+	}
+
+	// Which tier priced the request is a fact the log recorded, so it is
+	// reported whether or not the breakdown below could be recovered — it is
+	// the answer to "why is this row's unit price different from that one's".
+	// Ratio-priced models have no tiers and leave the cell empty.
+	if mode, _ := other["billing_mode"].(string); mode == "tiered_expr" {
+		tier, _ := other["matched_tier"].(string)
+		cols[colTier] = spreadsheetSafe(tier)
+	}
+
+	if tieredBillingColumns(cols, l, other, totalQuota, rate) {
+		return cols
 	}
 
 	modelRatio, hasModelRatio := number("model_ratio")
 	groupRatio, hasGroupRatio := number("group_ratio")
-	if perCall || !hasModelRatio || !hasGroupRatio {
+	// A non-positive model ratio is not a free request priced at zero, it is a
+	// request the ratios do not describe — expression pricing snapshots the
+	// ratio as 0. Quoting 0.00 per million there would read as "these tokens
+	// were free" while the whole charge sat unexplained in other_amount.
+	if !hasModelRatio || !hasGroupRatio || !modelRatio.IsPositive() {
 		cols[colOtherAmount] = quotaToAmount(totalQuota, rate)
 		return cols
 	}
@@ -353,6 +373,158 @@ func logBillingColumns(l *model.Log, rate decimal.Decimal) []string {
 	return cols
 }
 
+// tieredBillingColumns fills the breakdown for a log priced by a billing
+// expression (see pkg/billingexpr/expr.md) rather than by model ratios. Those
+// requests snapshot no usable ratios, so without this the entire charge would
+// land in other_amount with nothing for the customer to check it against.
+//
+// The log carries the expression that priced the request, so the split is
+// recovered by replaying it: pkg/billingexpr attributes the cost to each token
+// dimension, and the per-million price follows from the dimension's own cost.
+// Replaying reads the frozen expression from the log, never current settings,
+// so a later price change cannot alter a statement already sent.
+//
+// A replay can be incomplete — an expression may branch on request headers or
+// body fields this function has no access to, or price a dimension the consume
+// log never recorded. Both would understate a component's tokens and overstate
+// its cost, so the replay is published only when it lands in the tier that was
+// actually billed and costs no more than the charge on record. Otherwise the
+// row falls back to reporting the whole charge as other_amount, which is
+// unhelpful but never wrong.
+//
+// Returns false when the log is not expression-priced or the replay could not
+// be trusted, leaving cols untouched for the caller's ratio-based path.
+func tieredBillingColumns(cols []string, l *model.Log, other map[string]any, totalQuota, rate decimal.Decimal) bool {
+	if mode, _ := other["billing_mode"].(string); mode != "tiered_expr" {
+		return false
+	}
+	encoded, _ := other["expr_b64"].(string)
+	exprStr, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(exprStr) == 0 {
+		return false
+	}
+	groupRatio, ok := other["group_ratio"].(float64)
+	if !ok || groupRatio <= 0 {
+		return false
+	}
+
+	usedVars := billingexpr.UsedVars(string(exprStr))
+	// Image and audio output tokens are not recorded on a consume log. An
+	// expression pricing them separately means the completion total on record
+	// still contains them, so neither the output line nor the remainder can be
+	// stated correctly and the row is left to the fallback.
+	if usedVars["img_o"] || usedVars["ao"] {
+		return false
+	}
+
+	params := tieredTokenParams(l, other, usedVars)
+	split, err := billingexpr.SplitCost(string(exprStr), params)
+	if err != nil {
+		return false
+	}
+	// The tier settlement recorded is the one the customer was charged under.
+	// Its absence means settlement never got a price out of the expression and
+	// charged the pre-consumed estimate instead, so the tokens on the row do
+	// not explain the charge and must not be dressed up as if they did.
+	tier, settled := other["matched_tier"].(string)
+	if !settled || tier != split.Tier {
+		return false
+	}
+
+	// v1 expression coefficients are prices per million tokens, so a cost
+	// becomes quota the same way settlement converts it.
+	quotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit).Mul(decimal.NewFromFloat(groupRatio)).Div(tokensPerPriceUnit)
+	// Settlement rounds the total to whole quota, so a replay may legitimately
+	// land within one unit of the charge; anything above that is a replay that
+	// priced something the request never paid for.
+	if decimal.NewFromFloat(split.Total).Mul(quotaPerUnit).Sub(totalQuota).GreaterThan(decimal.NewFromInt(1)) {
+		return false
+	}
+
+	components := []struct {
+		tokensCol, priceCol, amountCol int
+		tokens                         decimal.Decimal
+		cost                           float64
+	}{
+		{colInputTokens, colInputPrice, colInputAmount, decimal.NewFromFloat(params.P), split.Costs["p"]},
+		{colCacheReadTokens, colCacheReadPrice, colCacheReadAmount, decimal.NewFromFloat(params.CR), split.Costs["cr"]},
+		// A Claude request can create 5m and 1h cache entries at once; the row
+		// reports them as one line at the blended price actually paid.
+		{colCacheWriteTokens, colCacheWritePrice, colCacheWriteAmount, decimal.NewFromFloat(params.CC + params.CC1h), split.Costs["cc"] + split.Costs["cc1h"]},
+		{colOutputTokens, colOutputPrice, colOutputAmount, decimal.NewFromFloat(params.C), split.Costs["c"]},
+	}
+	accounted := decimal.Zero
+	for _, component := range components {
+		if !component.tokens.IsPositive() {
+			continue
+		}
+		quota := decimal.NewFromFloat(component.cost).Mul(quotaPerUnit)
+		accounted = accounted.Add(quota)
+		cols[component.tokensCol] = component.tokens.String()
+		cols[component.priceCol] = quotaToAmount(quota.Div(component.tokens).Mul(tokensPerPriceUnit), rate)
+		cols[component.amountCol] = quotaToAmount(quota, rate)
+	}
+	cols[colOtherAmount] = quotaToAmount(totalQuota.Sub(accounted), rate)
+	return true
+}
+
+// tieredTokenParams rebuilds the token dimensions an expression was evaluated
+// against from what the consume log kept. It mirrors
+// service.BuildTieredTokenParams, including how a dimension the expression
+// prices separately is carved out of the prompt total, so a replay sees the
+// same numbers settlement did. The caller has already established that the
+// expression prices nothing the log failed to record.
+func tieredTokenParams(l *model.Log, other map[string]any, usedVars map[string]bool) billingexpr.TokenParams {
+	tokens := func(key string) float64 {
+		value, _ := other[key].(float64)
+		if value < 0 {
+			return 0
+		}
+		return value
+	}
+
+	params := billingexpr.TokenParams{
+		P:   float64(l.PromptTokens),
+		C:   float64(l.CompletionTokens),
+		CR:  tokens("cache_tokens"),
+		Img: tokens("image_output"),
+		AI:  tokens("audio_input_token_count"),
+	}
+
+	_, isClaude := other["claude"].(bool)
+	if isClaude {
+		// Anthropic splits cache creation by TTL and reports cache traffic
+		// outside the prompt total, so the context length has to be summed up.
+		params.CC = tokens("cache_creation_tokens_5m")
+		params.CC1h = tokens("cache_creation_tokens_1h")
+		params.Len = params.P + params.CR + params.CC + params.CC1h
+		return params
+	}
+
+	// Everything else reports cache, image and audio traffic inside the prompt
+	// total, so a dimension the expression prices on its own comes back out.
+	params.CC = tokens("cache_creation_tokens")
+	params.Len = params.P
+	if usedVars["cr"] {
+		params.P -= params.CR
+	}
+	if usedVars["cc"] {
+		params.P -= params.CC
+	}
+	if usedVars["img"] {
+		params.P -= params.Img
+	}
+	if usedVars["ai"] {
+		params.P -= params.AI
+	}
+	// OpenAI reports unadjusted cache prefix counts, so the carved dimensions
+	// can exceed the prompt total; settlement clamps at zero and so does this.
+	if params.P < 0 {
+		params.P = 0
+	}
+	return params
+}
+
 // pricePerUnit renders what one million tokens of a component cost, where ratio
 // is the component's multiplier over the plain input price.
 func pricePerUnit(ratio, quotaPerInputToken, rate decimal.Decimal) string {
@@ -364,15 +536,89 @@ func quotaToAmount(quota, rate decimal.Decimal) string {
 	return quota.Div(decimal.NewFromFloat(common.QuotaPerUnit)).Mul(rate).StringFixed(6)
 }
 
+// billingCalculation writes out the arithmetic behind a row's charge, so a
+// customer sees where the number came from without having to read a guide or
+// rebuild the formula in a spreadsheet. It is deliberately plain text rather
+// than a spreadsheet formula: a statement is a record of what was charged, and
+// a live formula would recompute — and silently disagree with itself — the
+// moment a recipient sorted, filtered or edited the sheet.
+//
+// Every number in it appears verbatim in another column of the same row, so a
+// customer can trace each term back to the cell it came from.
+//
+// Returns empty for a row with no itemisation to explain, matching the empty
+// cells the rest of that row already carries.
+func billingCalculation(cols []string) string {
+	terms := make([]string, 0, 5)
+	for _, component := range [][2]int{
+		{colInputTokens, colInputPrice},
+		{colCacheReadTokens, colCacheReadPrice},
+		{colCacheWriteTokens, colCacheWritePrice},
+		{colOutputTokens, colOutputPrice},
+	} {
+		if cols[component[0]] == "" {
+			continue
+		}
+		terms = append(terms, fmt.Sprintf("%s×%s÷1M", cols[component[0]], cols[component[1]]))
+	}
+	if len(terms) == 0 {
+		return ""
+	}
+
+	// The remainder is already an amount, so it joins as a plain addend. It is
+	// left out when it rounds away to nothing, which is the common case: a row
+	// reading "+ 0.000000" would invite the question the column exists to
+	// answer.
+	other := cols[colOtherAmount]
+	switch {
+	case other == "" || other == "0.000000" || other == "-0.000000":
+	case strings.HasPrefix(other, "-"):
+		terms = append(terms, "- "+strings.TrimPrefix(other, "-"))
+	default:
+		terms = append(terms, "+ "+other)
+	}
+
+	// The leading terms are joined with the operator the trailing ones carry
+	// themselves, since a negative remainder subtracts rather than adds.
+	joined := terms[0]
+	for _, term := range terms[1:] {
+		if strings.HasPrefix(term, "- ") || strings.HasPrefix(term, "+ ") {
+			joined += " " + term
+			continue
+		}
+		joined += " + " + term
+	}
+	return joined + " = " + cols[colTotalAmount]
+}
+
+// spreadsheetSafe neutralises a text field a spreadsheet would otherwise run as
+// a formula. Names are chosen by users, so a token named "=1+1" — or worse —
+// must reach the customer as the text it is. The leading apostrophe marks the
+// cell as text in Excel and Sheets without being displayed; other readers show
+// it literally, which is the lesser evil against a statement that executes
+// something on open.
+func spreadsheetSafe(value string) string {
+	if value == "" {
+		return value
+	}
+	switch value[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + value
+	}
+	return value
+}
+
 func logToCSVRow(l *model.Log, currency string, rate decimal.Decimal) []string {
 	row := []string{
 		time.Unix(l.CreatedAt, 0).In(logExportTimeZone).Format("2006-01-02 15:04:05"),
 		l.RequestId,
-		l.Username,
-		l.TokenName,
-		l.ModelName,
+		spreadsheetSafe(l.Username),
+		spreadsheetSafe(l.TokenName),
+		spreadsheetSafe(l.ModelName),
 	}
-	row = append(row, logBillingColumns(l, rate)...)
+	billing := logBillingColumns(l, rate)
+	billing[colCalculation] = billingCalculation(billing)
+	row = append(row, billing...)
 	// The rate is repeated on every row so a single row is enough to re-derive
 	// the amounts, without the reader having to look elsewhere for the basis.
 	return append(row, currency, rate.String())
