@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"encoding/base64"
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -277,5 +279,364 @@ func TestLogToCSVRowIdentityColumns(t *testing.T) {
 	assert.Equal(t, "gpt-4o", row[columnIndex(t, "model")])
 	for _, leaked := range []string{"azure", "203.0.113.9", "prompt text", "7"} {
 		assert.NotContainsf(t, row, leaked, "%q must not reach a customer statement", leaked)
+	}
+}
+
+// tieredOther builds the other JSON an expression-priced consume log carries:
+// the frozen expression, the tier it matched and the group ratio settlement
+// applied. An expression with no tier() call still records an empty matched
+// tier, which is what marks the charge as one the expression actually priced.
+// extra is spliced in for the token counts a case needs.
+func tieredOther(expr, matchedTier, extra string) string {
+	other := fmt.Sprintf(`{"billing_mode":"tiered_expr","expr_b64":%q,"matched_tier":%q,"group_ratio":1,"model_ratio":0,"completion_ratio":0`,
+		base64.StdEncoding.EncodeToString([]byte(expr)), matchedTier)
+	if extra != "" {
+		other += "," + extra
+	}
+	return other + "}"
+}
+
+// TestLogBillingColumnsExpressionPricing covers models priced by a billing
+// expression rather than by model ratios. Those logs snapshot a zero model
+// ratio, so before the expression was replayed the whole charge landed in
+// other_amount with no prices for the customer to verify. The token counts and
+// charges here are real gpt-5.5 and claude-opus rows from a production
+// statement.
+func TestLogBillingColumnsExpressionPricing(t *testing.T) {
+	require.Equal(t, 500*1000.0, common.QuotaPerUnit, "QuotaPerUnit drives the expected amounts in this test")
+	useCurrency(t, operation_setting.QuotaDisplayTypeUSD, 7)
+
+	tests := []struct {
+		name          string
+		log           *model.Log
+		expected      map[string]string
+		expectedOther float64
+	}{
+		{
+			// 98053 × $5/1M + 360 × $30/1M = $0.501065, charged as 250533 quota.
+			name: "openai semantics without cache",
+			log: &model.Log{
+				PromptTokens: 98053, CompletionTokens: 360, Quota: 250533,
+				Other: tieredOther("p * 5 + c * 30 + cr * 0.5", "", ""),
+			},
+			expected: map[string]string{
+				"input_tokens": "98053", "input_price_per_1m": "5.000000", "input_amount": "0.490265",
+				"output_tokens": "360", "output_price_per_1m": "30.000000", "output_amount": "0.010800",
+			},
+			expectedOther: 0.000001,
+		},
+		{
+			// 1725 × $5 + 97664 × $0.5 + 288 × $30 per 1M = $0.066098.
+			name: "cache read is carved out of the prompt total",
+			log: &model.Log{
+				PromptTokens: 99389, CompletionTokens: 288, Quota: 33049,
+				Other: tieredOther("p * 5 + c * 30 + cr * 0.5", "", `"cache_tokens":97664`),
+			},
+			expected: map[string]string{
+				"input_tokens": "1725", "input_price_per_1m": "5.000000", "input_amount": "0.008625",
+				"cache_read_tokens": "97664", "cache_read_price_per_1m": "0.500000", "cache_read_amount": "0.048832",
+				"output_tokens": "288", "output_price_per_1m": "30.000000", "output_amount": "0.008640",
+			},
+			expectedOther: 0.000001,
+		},
+		{
+			// Anthropic reports cache creation alongside the prompt total:
+			// 2 × $5 + 83917 × $6.25 + 1018 × $25 per 1M = $0.549941.
+			name: "anthropic semantics with cache write",
+			log: &model.Log{
+				PromptTokens: 2, CompletionTokens: 1018, Quota: 274971,
+				Other: tieredOther("p * 5 + c * 25 + cr * 0.5 + cc * 6.25", "",
+					`"claude":true,"cache_creation_tokens":83917,"cache_creation_tokens_5m":83917`),
+			},
+			expected: map[string]string{
+				"input_tokens": "2", "input_price_per_1m": "5.000000",
+				"cache_write_tokens": "83917", "cache_write_price_per_1m": "6.250000", "cache_write_amount": "0.524481",
+				"output_tokens": "1018", "output_price_per_1m": "25.000000", "output_amount": "0.025450",
+			},
+			expectedOther: 0.000001,
+		},
+		{
+			// The prices a tier expression quotes are the matched tier's, which
+			// no single coefficient in the expression source carries.
+			name: "long context tier prices the row",
+			log: &model.Log{
+				PromptTokens: 300000, CompletionTokens: 1000, Quota: 911250,
+				Other: tieredOther(`len <= 200000 ? tier("standard", p * 3 + c * 15) : tier("long_context", p * 6 + c * 22.5)`,
+					"long_context", ""),
+			},
+			expected: map[string]string{
+				"input_tokens": "300000", "input_price_per_1m": "6.000000", "input_amount": "1.800000",
+				"output_tokens": "1000", "output_price_per_1m": "22.500000", "output_amount": "0.022500",
+			},
+			expectedOther: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row := logToCSVRow(tc.log, "USD", decimal.NewFromInt(1))
+
+			for column, expected := range tc.expected {
+				assert.Equalf(t, expected, row[columnIndex(t, column)], "column %s", column)
+			}
+			assert.Equal(t, "per_token", row[columnIndex(t, "billing_mode")])
+			assert.InDelta(t, tc.expectedOther, amountAt(t, row, "other_amount"), 1e-9,
+				"other_amount must only absorb settlement rounding here")
+			components := amountAt(t, row, "input_amount") +
+				amountAt(t, row, "cache_read_amount") +
+				amountAt(t, row, "cache_write_amount") +
+				amountAt(t, row, "output_amount") +
+				amountAt(t, row, "other_amount")
+			assert.InDelta(t, amountAt(t, row, "total_amount"), components, 1e-9,
+				"components must add up to the charged total")
+		})
+	}
+}
+
+// TestLogBillingColumnsExpressionFallback keeps a replay the exporter cannot
+// stand behind out of a customer's statement. Reporting the charge whole is
+// unhelpful, but quoting prices derived from the wrong tier, or from tokens the
+// log never recorded, would be wrong — and wrong is what a statement cannot be.
+func TestLogBillingColumnsExpressionFallback(t *testing.T) {
+	useCurrency(t, operation_setting.QuotaDisplayTypeUSD, 7)
+
+	tiered := `len <= 200000 ? tier("standard", p * 3 + c * 15) : tier("long_context", p * 6 + c * 22.5)`
+
+	tests := []struct {
+		name string
+		log  *model.Log
+	}{
+		{
+			// Header- and body-driven tiers cannot be replayed from a log, so a
+			// replay landing outside the billed tier is discarded.
+			name: "replay lands in a different tier than the one billed",
+			log: &model.Log{
+				PromptTokens: 300000, CompletionTokens: 1000, Quota: 456750,
+				Other: tieredOther(tiered, "standard", ""),
+			},
+		},
+		{
+			// Audio output tokens never reach a consume log, so the completion
+			// total cannot be carved up and the replay overprices the row.
+			name: "expression prices a dimension the log never recorded",
+			log: &model.Log{
+				PromptTokens: 98053, CompletionTokens: 360, Quota: 250533,
+				Other: tieredOther("p * 5 + c * 30 + ao * 100", "", ""),
+			},
+		},
+		{
+			name: "expression is unparseable",
+			log: &model.Log{
+				PromptTokens: 100, CompletionTokens: 10, Quota: 500,
+				Other: tieredOther("p * ", "", ""),
+			},
+		},
+		{
+			// No matched tier means settlement could not price the request and
+			// charged the pre-consumed estimate, which these tokens do not
+			// explain however the expression is replayed.
+			name: "settlement never priced the request with the expression",
+			log: &model.Log{
+				PromptTokens: 98053, CompletionTokens: 360, Quota: 250533,
+				Other: `{"billing_mode":"tiered_expr","expr_b64":"cCAqIDUgKyBjICogMzA=","group_ratio":1,"model_ratio":0}`,
+			},
+		},
+		{
+			name: "group ratio is missing",
+			log: &model.Log{
+				PromptTokens: 100, CompletionTokens: 10, Quota: 500,
+				Other: `{"billing_mode":"tiered_expr","expr_b64":"cCAqIDU=","model_ratio":0}`,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row := logToCSVRow(tc.log, "USD", decimal.NewFromInt(1))
+
+			for _, column := range []string{
+				"input_tokens", "input_price_per_1m", "input_amount",
+				"cache_read_tokens", "cache_read_price_per_1m", "cache_read_amount",
+				"cache_write_tokens", "cache_write_price_per_1m", "cache_write_amount",
+				"output_tokens", "output_price_per_1m", "output_amount",
+			} {
+				assert.Emptyf(t, row[columnIndex(t, column)], "%s must stay empty when the split cannot be trusted", column)
+			}
+			assert.InDelta(t, float64(tc.log.Quota)/common.QuotaPerUnit, amountAt(t, row, "other_amount"), 1e-9,
+				"the whole charge must be reported rather than a breakdown that does not hold")
+		})
+	}
+}
+
+// TestLogBillingColumnsRejectsZeroModelRatio locks the fix for statements that
+// quoted 0.00 per million on every token of an expression-priced row whose
+// replay failed. A zero ratio means the ratios do not describe this charge, and
+// an empty cell says that; a zero price says the tokens were free.
+func TestLogBillingColumnsRejectsZeroModelRatio(t *testing.T) {
+	useCurrency(t, operation_setting.QuotaDisplayTypeUSD, 7)
+
+	log := &model.Log{
+		PromptTokens: 98053, CompletionTokens: 360, Quota: 250533,
+		Other: `{"model_ratio":0,"group_ratio":1,"completion_ratio":0,"cache_tokens":0,"cache_ratio":0}`,
+	}
+
+	row := logToCSVRow(log, "USD", decimal.NewFromInt(1))
+
+	assert.Empty(t, row[columnIndex(t, "input_price_per_1m")])
+	assert.Empty(t, row[columnIndex(t, "output_price_per_1m")])
+	assert.InDelta(t, float64(log.Quota)/common.QuotaPerUnit, amountAt(t, row, "other_amount"), 1e-9)
+}
+
+// TestBillingCalculationExplainsTheCharge locks the column a customer reads
+// instead of rebuilding the arithmetic themselves: every term must trace back
+// to another cell on the same row, and the line must end at the charge.
+func TestBillingCalculationExplainsTheCharge(t *testing.T) {
+	useCurrency(t, operation_setting.QuotaDisplayTypeCNY, 7)
+
+	tests := []struct {
+		name     string
+		log      *model.Log
+		expected string
+	}{
+		{
+			name: "ratio priced row with cache read",
+			log: &model.Log{
+				PromptTokens: 108899, CompletionTokens: 1291, Quota: 19450,
+				Other: `{"model_ratio":0.875,"group_ratio":1,"completion_ratio":8,"cache_tokens":107776,"cache_ratio":0.1}`,
+			},
+			expected: "1123×12.250000÷1M + 107776×1.225000÷1M + 1291×98.000000÷1M = 0.272300",
+		},
+		{
+			name: "expression priced row keeps a rounding remainder visible",
+			log: &model.Log{
+				PromptTokens: 99389, CompletionTokens: 288, Quota: 33049,
+				Other: tieredOther("p * 5 + c * 30 + cr * 0.5", "", `"cache_tokens":97664`),
+			},
+			expected: "1725×35.000000÷1M + 97664×3.500000÷1M + 288×210.000000÷1M + 0.000007 = 0.462686",
+		},
+		{
+			name: "cache write row",
+			log: &model.Log{
+				PromptTokens: 2, CompletionTokens: 1018, Quota: 274971,
+				Other: tieredOther("p * 5 + c * 25 + cr * 0.5 + cc * 6.25", "",
+					`"claude":true,"cache_creation_tokens":83917,"cache_creation_tokens_5m":83917`),
+			},
+			expected: "2×35.000000÷1M + 83917×43.750000÷1M + 1018×175.000000÷1M + 0.000005 = 3.849594",
+		},
+		{
+			// Settlement can round a hair above the components, and the column
+			// has to say so rather than quietly drop the difference.
+			name: "negative remainder subtracts",
+			log: &model.Log{
+				PromptTokens: 1000000, CompletionTokens: 0, Quota: 874999,
+				Other: `{"model_ratio":0.875,"group_ratio":1,"completion_ratio":8}`,
+			},
+			expected: "1000000×12.250000÷1M + 0×98.000000÷1M - 0.000014 = 12.249986",
+		},
+		{
+			name: "per-call row has no arithmetic to show",
+			log: &model.Log{
+				PromptTokens: 10, CompletionTokens: 0, Quota: 25000,
+				Other: `{"model_price":0.05,"group_ratio":1}`,
+			},
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row := logToCSVRow(tc.log, "CNY", decimal.NewFromInt(7))
+
+			assert.Equal(t, tc.expected, row[columnIndex(t, "calculation")])
+		})
+	}
+}
+
+// TestLogToCSVRowNeutralisesSpreadsheetFormulas keeps a name a user chose from
+// being executed by the spreadsheet the statement is opened in, while leaving
+// the amounts as numbers the sheet can still add up.
+func TestLogToCSVRowNeutralisesSpreadsheetFormulas(t *testing.T) {
+	useCurrency(t, operation_setting.QuotaDisplayTypeUSD, 7)
+
+	log := &model.Log{
+		Username: "=1+1", TokenName: "@SUM(A1)", ModelName: "-gpt", RequestId: "req-1",
+		PromptTokens: 1000000, CompletionTokens: 0, Quota: 874999,
+		Other: `{"model_ratio":0.875,"group_ratio":1,"completion_ratio":8}`,
+	}
+
+	row := logToCSVRow(log, "USD", decimal.NewFromInt(1))
+
+	assert.Equal(t, "'=1+1", row[columnIndex(t, "username")])
+	assert.Equal(t, "'@SUM(A1)", row[columnIndex(t, "token_name")])
+	assert.Equal(t, "'-gpt", row[columnIndex(t, "model")])
+	assert.Equal(t, "req-1", row[columnIndex(t, "request_id")])
+	// A negative amount is a number, not a formula: escaping it would stop the
+	// column from summing in the sheet the customer reconciles in.
+	assert.Equal(t, "-0.000002", row[columnIndex(t, "other_amount")])
+}
+
+// TestLogBillingColumnsReportsTier answers the question a customer asks when
+// two rows of the same model quote different unit prices. The tier is a fact
+// settlement recorded, so it is reported even for a row whose breakdown could
+// not be recovered, and it stays empty for models that have no tiers at all.
+func TestLogBillingColumnsReportsTier(t *testing.T) {
+	useCurrency(t, operation_setting.QuotaDisplayTypeUSD, 7)
+
+	tiered := `len <= 200000 ? tier("standard", p * 3 + c * 15) : tier("long_context", p * 6 + c * 22.5)`
+
+	tests := []struct {
+		name         string
+		log          *model.Log
+		expectedTier string
+	}{
+		{
+			name: "the billed tier is named",
+			log: &model.Log{
+				PromptTokens: 300000, CompletionTokens: 1000, Quota: 911250,
+				Other: tieredOther(tiered, "long_context", ""),
+			},
+			expectedTier: "long_context",
+		},
+		{
+			// The breakdown falls back here, but the tier is still on record.
+			name: "a row that could not be split still names its tier",
+			log: &model.Log{
+				PromptTokens: 98053, CompletionTokens: 360, Quota: 250533,
+				Other: tieredOther("p * 5 + c * 30 + ao * 100", "base", ""),
+			},
+			expectedTier: "base",
+		},
+		{
+			name: "an expression with no tiers has nothing to name",
+			log: &model.Log{
+				PromptTokens: 98053, CompletionTokens: 360, Quota: 250533,
+				Other: tieredOther("p * 5 + c * 30", "", ""),
+			},
+			expectedTier: "",
+		},
+		{
+			name: "ratio priced models have no tiers",
+			log: &model.Log{
+				PromptTokens: 1000, CompletionTokens: 500, Quota: 5000,
+				Other: `{"model_ratio":2,"group_ratio":1,"completion_ratio":3}`,
+			},
+			expectedTier: "",
+		},
+		{
+			name: "per-call pricing has no tiers",
+			log: &model.Log{
+				PromptTokens: 10, CompletionTokens: 0, Quota: 25000,
+				Other: `{"model_price":0.05,"group_ratio":1}`,
+			},
+			expectedTier: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row := logToCSVRow(tc.log, "USD", decimal.NewFromInt(1))
+
+			assert.Equal(t, tc.expectedTier, row[columnIndex(t, "tier")])
+		})
 	}
 }
