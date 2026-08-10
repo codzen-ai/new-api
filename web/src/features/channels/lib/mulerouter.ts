@@ -59,7 +59,7 @@ export const MULEROUTER_ROUTES_PLACEHOLDER = `{
       "model": "wan2.2-i2v-spicy",
       "billing_vars": [
         { "name": "seconds", "source": "duration", "kind": "int",
-          "enum": [5, 8], "default": "5", "divisor": 5 },
+          "enum": [5, 8], "default": "5", "divisor": 1 },
         { "name": "resolution", "source": "resolution", "kind": "enum",
           "values": { "480p": 1.0, "720p": 2.0 }, "default": "480p" }
       ]

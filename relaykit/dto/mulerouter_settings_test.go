@@ -10,14 +10,17 @@ import (
 func floatPtr(v float64) *float64 { return &v }
 
 // wan2.2-i2v-spicy: upstream charges $0.02/s at 480p and $0.04/s at 720p, so a
-// base price of one 5s/480p clip times these multipliers must reproduce the
-// upstream price exactly for every accepted combination.
+// per-second base price times these multipliers must reproduce the upstream
+// price exactly for every accepted combination. The seconds multiplier is the
+// second count itself, matching how every other duration-priced task adaptor
+// (ali, gemini, sora, vertex) names and scales it — the multiplier shows up on
+// the admin's bill, so it has to mean what it says.
 func videoRoute() MuleRouterRoute {
 	return MuleRouterRoute{
 		Vendor: "carrothub",
 		Model:  "wan2.2-i2v-spicy",
 		BillingVars: []MuleRouterBillingVar{
-			{Name: "seconds", Source: "duration", Kind: MuleRouterVarKindInt, Enum: []float64{5, 8}, Default: "5", Divisor: 5},
+			{Name: "seconds", Source: "duration", Kind: MuleRouterVarKindInt, Enum: []float64{5, 8}, Default: "5", Divisor: 1},
 			{Name: "resolution", Source: "resolution", Kind: MuleRouterVarKindEnum, Values: map[string]float64{"480p": 1, "720p": 2}, Default: "480p"},
 		},
 	}
@@ -34,17 +37,17 @@ func TestEvaluateBillingMultipliers(t *testing.T) {
 		{
 			name:   "defaults apply when fields are omitted",
 			params: map[string]any{"prompt": "a", "image": "https://example.com/a.png"},
-			want:   map[string]float64{"seconds": 1, "resolution": 1},
+			want:   map[string]float64{"seconds": 5, "resolution": 1},
 		},
 		{
 			name:   "longest and largest accepted combination",
 			params: map[string]any{"duration": float64(8), "resolution": "720p"},
-			want:   map[string]float64{"seconds": 1.6, "resolution": 2},
+			want:   map[string]float64{"seconds": 8, "resolution": 2},
 		},
 		{
 			name:   "resolution alone",
 			params: map[string]any{"resolution": "720p"},
-			want:   map[string]float64{"seconds": 1, "resolution": 2},
+			want:   map[string]float64{"seconds": 5, "resolution": 2},
 		},
 	}
 
@@ -151,7 +154,7 @@ func TestMuleRouterConfigValidate(t *testing.T) {
 			config: MuleRouterConfig{Routes: []MuleRouterRoute{{
 				Vendor: "carrothub", Model: "wan2.2-i2v-spicy",
 				BillingVars: []MuleRouterBillingVar{
-					{Name: "seconds", Source: "duration", Kind: MuleRouterVarKindInt, Min: floatPtr(1), Default: "5", Divisor: 5},
+					{Name: "seconds", Source: "duration", Kind: MuleRouterVarKindInt, Min: floatPtr(1), Default: "5", Divisor: 1},
 				},
 			}}},
 			wantErr: "must declare max or enum",
@@ -161,7 +164,7 @@ func TestMuleRouterConfigValidate(t *testing.T) {
 			config: MuleRouterConfig{Routes: []MuleRouterRoute{{
 				Vendor: "carrothub", Model: "wan2.2-i2v-spicy",
 				BillingVars: []MuleRouterBillingVar{
-					{Name: "seconds", Source: "duration", Kind: MuleRouterVarKindInt, Enum: []float64{5, 8}, Default: "6", Divisor: 5},
+					{Name: "seconds", Source: "duration", Kind: MuleRouterVarKindInt, Enum: []float64{5, 8}, Default: "6", Divisor: 1},
 				},
 			}}},
 			wantErr: "default is invalid",
