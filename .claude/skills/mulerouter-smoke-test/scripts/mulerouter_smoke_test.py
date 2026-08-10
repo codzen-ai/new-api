@@ -23,12 +23,13 @@ QUOTA_PER_UNIT = 500_000.0
 TASK_ID_PREFIX = "task_"
 VENDOR_PREFIX = "/vendors/carrothub/v1"
 
-# 上游价目（美元），来自各端点文档页。基准档与 billing_vars 的倍率基准一致。
+# 上游基准单位价（美元），来自各端点文档页：图片按张，视频按秒 —— 与 billing_vars 的
+# 倍率基准一致（seconds 倍率取实际秒数，和 ali/gemini/sora/vertex 的约定相同）。
 # 实例配的 model_price 可以更高（加价是运营决策），preflight 只在低于成本价时警告。
 UPSTREAM_BASE_PRICE = {
     "carrothub/qwen-image-edit-spicy/generation": 0.04,
     "carrothub/z-image-spicy/generation": 0.013,
-    "carrothub/wan2.2-i2v-spicy/generation": 0.10,
+    "carrothub/wan2.2-i2v-spicy/generation": 0.02,
 }
 
 # 每个用例声明它期望的倍率，这是断言的核心：倍率不对就是计费不对。
@@ -64,7 +65,7 @@ CASES = {
         "model": "carrothub/wan2.2-i2v-spicy/generation",
         "endpoint": "wan2.2-i2v-spicy",
         "body": {"prompt": "the camera slowly pushes in", "duration": 5, "resolution": "480p"},
-        "expect_ratios": {"seconds": 1.0, "resolution": 1.0},
+        "expect_ratios": {"seconds": 5.0, "resolution": 1.0},
         "artifact_key": "videos",
         "produces_image": False,
         "needs_image": True,
@@ -73,7 +74,7 @@ CASES = {
         "model": "carrothub/wan2.2-i2v-spicy/generation",
         "endpoint": "wan2.2-i2v-spicy",
         "body": {"prompt": "the camera orbits around the subject", "duration": 8, "resolution": "720p"},
-        "expect_ratios": {"seconds": 1.6, "resolution": 2.0},
+        "expect_ratios": {"seconds": 8.0, "resolution": 2.0},
         "artifact_key": "videos",
         "produces_image": False,
         "needs_image": True,

@@ -101,7 +101,7 @@ GET  /vendors/carrothub/v1/wan2.2-i2v-spicy/generation/{task_id}
         "action": "generation",              // 默认 generation
         "billing_vars": [
           { "name": "seconds",    "source": "duration",   "kind": "int",
-            "enum": [5, 8], "default": "5", "divisor": 5 },
+            "enum": [5, 8], "default": "5", "divisor": 1 },
           { "name": "resolution", "source": "resolution", "kind": "enum",
             "values": { "480p": 1.0, "720p": 2.0 }, "default": "480p" }
         ]
@@ -440,14 +440,19 @@ MuleRouter 任务量一大会同时造成：(a) 占满 1000 的取数配额，�
 |---|---|---|---|
 | `carrothub/qwen-image-edit-spicy/generation` | 单张 | `0.04` | 无 |
 | `carrothub/z-image-spicy/generation` | 单张，不含改写 | `0.013` | `prompt_extend`: enum `{true: 1.076923, false: 1.0}`（默认 true）；`width`/`height`: int 256–1536，不设 `divisor`（只校验不计费） |
-| `carrothub/wan2.2-i2v-spicy/generation` | 5s / 480p | `0.10` | `seconds`: int enum `[5,8]`，`divisor: 5`；`resolution`: enum `{480p: 1.0, 720p: 2.0}` |
+| `carrothub/wan2.2-i2v-spicy/generation` | **1 秒** / 480p | `0.02` | `seconds`: int enum `[5,8]`，`divisor: 1`；`resolution`: enum `{480p: 1.0, 720p: 2.0}` |
+
+视频模型的基准档是**一秒**而不是一段 5 秒的片子，因为仓库里所有按时长计费的 task adaptor
+（ali / gemini / sora / vertex）都把 `seconds` 倍率取成实际秒数，基础价按秒。用「每 5 秒一档」
+的写法（`divisor: 5`、基础价 $0.10）算出来的钱一模一样，但管理端日志会显示
+`计算参数：seconds: 1.00`，读起来像是 1 秒的视频。倍率的名字会出现在账单上，得说人话。
 
 **本期范围就是这三个模型**，其余 vendor（alibaba / klingai / minimax / google 等）不实现、不配置。
 它们的存在只用于论证第 3–5 节的抽象必须是配置驱动的——接它们时应当只加配置行，
 若届时发现仍需改代码，说明本方案的抽象没做对。
 
-验算 `wan2.2-i2v-spicy`：8s/720p = `0.10 × (8/5) × 2.0 = $0.32`，与上游 `$0.04/s × 8s` 一致；
-5s/720p = `0.10 × 1 × 2.0 = $0.20` = `$0.04 × 5`。倍率模型对这个模型是**精确**的，
+验算 `wan2.2-i2v-spicy`：8s/720p = `0.02 × 8 × 2.0 = $0.32`，与上游 `$0.04/s × 8s` 一致；
+5s/480p = `0.02 × 5 × 1.0 = $0.10` = `$0.02 × 5`。倍率模型对这个模型是**精确**的，
 因为上游本身就是「单价 × 秒数」的线性结构。
 
 `z-image-spicy` 的 `width`/`height` 不影响价格（各分辨率统一 $0.013），
