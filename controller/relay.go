@@ -590,6 +590,9 @@ func RelayTask(c *gin.Context) {
 		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
 		task.PrivateData.TokenId = relayInfo.TokenId
 		task.PrivateData.NodeName = common.NodeName
+		// 结算与退款发生在轮询阶段，没有请求上下文可用；把提交请求的 ID 存下来，
+		// 让那几条日志能与这里的预扣日志归为同一笔。
+		task.PrivateData.RequestID = c.GetString(common.RequestIdKey)
 		task.PrivateData.BillingContext = &model.TaskBillingContext{
 			ModelPrice:      relayInfo.PriceData.ModelPrice,
 			GroupRatio:      relayInfo.PriceData.GroupRatioInfo.GroupRatio,
