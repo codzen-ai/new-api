@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
+	taskmulerouter "github.com/QuantumNous/new-api/relay/channel/task/mulerouter"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -291,6 +292,8 @@ var fetchRespBuilders = map[int]func(c *gin.Context) (respBody []byte, taskResp 
 	relayconstant.RelayModeSunoFetchByID:  sunoFetchByIDRespBodyBuilder,
 	relayconstant.RelayModeSunoFetch:      sunoFetchRespBodyBuilder,
 	relayconstant.RelayModeVideoFetchByID: videoFetchByIDRespBodyBuilder,
+
+	relayconstant.RelayModeMuleRouterFetchByID: muleRouterFetchByIDRespBodyBuilder,
 }
 
 func RelayTaskFetch(c *gin.Context, relayMode int) (taskResp *dto.TaskError) {
@@ -366,6 +369,29 @@ func sunoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *dt
 		Data: TaskModel2Dto(originTask),
 	})
 	return
+}
+
+// muleRouterFetchByIDRespBodyBuilder renders the task in MuleRouter's own
+// response shape, so vendor-native clients see the payload they expect.
+func muleRouterFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *dto.TaskError) {
+	taskId := c.GetString("task_id")
+	if taskId == "" {
+		taskId = c.Param("task_id")
+	}
+
+	originTask, exist, err := model.GetByTaskId(c.GetInt("id"), taskId)
+	if err != nil {
+		return nil, service.TaskErrorWrapper(err, "get_task_failed", http.StatusInternalServerError)
+	}
+	if !exist {
+		return nil, service.TaskErrorWrapperLocal(errors.New("task_not_exist"), "task_not_exist", http.StatusBadRequest)
+	}
+
+	respBody, err = taskmulerouter.BuildFetchResponse(originTask)
+	if err != nil {
+		return nil, service.TaskErrorWrapper(err, "marshal_response_failed", http.StatusInternalServerError)
+	}
+	return respBody, nil
 }
 
 func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *dto.TaskError) {

@@ -462,6 +462,9 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	resp, err := adaptor.FetchTask(baseURL, key, map[string]any{
 		"task_id": task.GetUpstreamTaskID(),
 		"action":  task.Action,
+		// Adaptors whose query URL depends on the model (MuleRouter routes the
+		// task id under its own model path) cannot recover it any other way.
+		"model": task.Properties.UpstreamModelName,
 	}, proxy)
 	if err != nil {
 		return fmt.Errorf("fetchTask failed for task %s: %w", taskId, err)

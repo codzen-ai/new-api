@@ -139,6 +139,7 @@ import {
 import {
   ADD_MODE_OPTIONS,
   CHANNEL_STATUS_LABELS,
+  CHANNEL_TYPE_MULEROUTER,
   CHANNEL_TYPE_OPTIONS,
   CHANNEL_TYPE_WARNINGS,
   ERROR_MESSAGES,
@@ -153,6 +154,7 @@ import {
   channelFormSchema,
   channelsQueryKeys,
   getAdvancedCustomStats,
+  MULEROUTER_ROUTES_PLACEHOLDER,
   transformChannelToFormDefaults,
   type ChannelFormValues,
   deduplicateKeys,
@@ -2865,6 +2867,36 @@ export function ChannelMutateDrawer({
                               />
                             )}
 
+                            {currentType === CHANNEL_TYPE_MULEROUTER && (
+                              <FormField
+                                control={form.control}
+                                name='mulerouter'
+                                render={({ field }) => (
+                                  <FormItem className='space-y-3 border-y py-4'>
+                                    <FormLabel>
+                                      {t('MuleRouter Routes')}
+                                    </FormLabel>
+                                    <FormControl>
+                                      <Textarea
+                                        placeholder={
+                                          MULEROUTER_ROUTES_PLACEHOLDER
+                                        }
+                                        rows={12}
+                                        className='font-mono text-xs'
+                                        {...field}
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(
+                                        'Route table in JSON. Each route maps /vendors/{vendor}/v1/{model}/{action} to the model name "{vendor}/{model}/{action}". Every request field that scales cost must be declared in billing_vars with bounds; undeclared cost fields are rejected at request time.'
+                                      )}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
+                            )}
+
                             <ChannelAuthSection>
                               {!isEditing && (
                                 <FormField
@@ -4233,9 +4265,7 @@ export function ChannelMutateDrawer({
                                         <SelectValue />
                                       </SelectTrigger>
                                     </FormControl>
-                                    <SelectContent
-                                      alignItemWithTrigger={false}
-                                    >
+                                    <SelectContent alignItemWithTrigger={false}>
                                       <SelectGroup>
                                         <SelectItem value='auto'>
                                           {t('Auto')}

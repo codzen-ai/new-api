@@ -5250,6 +5250,18 @@
     "Zero retention": "データ保持なし",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム"
+    "Zoom": "ズーム",
+    "MuleRouter Routes": "MuleRouter ルート",
+    "Route table in JSON. Each route maps /vendors/{vendor}/v1/{model}/{action} to the model name \"{vendor}/{model}/{action}\". Every request field that scales cost must be declared in billing_vars with bounds; undeclared cost fields are rejected at request time.": "JSON 形式のルートテーブルです。各ルートは /vendors/{vendor}/v1/{model}/{action} をモデル名 \"{vendor}/{model}/{action}\" に対応付けます。コストに影響するリクエストフィールドはすべて billing_vars で範囲付きで宣言する必要があり、未宣言のコストフィールドはリクエスト時に拒否されます。",
+    "MuleRouter route table is required": "MuleRouter ルートテーブルは必須です",
+    "MuleRouter route table must be a JSON object": "MuleRouter ルートテーブルは JSON オブジェクトである必要があります",
+    "MuleRouter route table requires at least one route": "MuleRouter ルートテーブルには少なくとも 1 つのルートが必要です",
+    "Every MuleRouter route requires vendor and model": "すべての MuleRouter ルートに vendor と model が必要です",
+    "MuleRouter routes must map to distinct models": "MuleRouter ルートは異なるモデルに対応付ける必要があります",
+    "Every billing var requires a name": "すべての課金変数に name が必要です",
+    "Every billing var must be of kind int or enum": "課金変数の kind は int または enum である必要があります",
+    "Every billing var requires a default": "すべての課金変数に default が必要です",
+    "Every enum billing var requires values": "enum 型の課金変数には values が必要です",
+    "A billing var that contributes a multiplier must declare max or enum": "倍率に寄与する課金変数は max または enum を宣言する必要があります"
   }
 }

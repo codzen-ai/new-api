@@ -5250,6 +5250,18 @@
     "Zero retention": "Без хранения данных",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "MuleRouter Routes": "Маршруты MuleRouter",
+    "Route table in JSON. Each route maps /vendors/{vendor}/v1/{model}/{action} to the model name \"{vendor}/{model}/{action}\". Every request field that scales cost must be declared in billing_vars with bounds; undeclared cost fields are rejected at request time.": "Таблица маршрутов в формате JSON. Каждый маршрут сопоставляет /vendors/{vendor}/v1/{model}/{action} с именем модели \"{vendor}/{model}/{action}\". Каждое поле запроса, влияющее на стоимость, должно быть объявлено в billing_vars с границами; необъявленные поля стоимости отклоняются при запросе.",
+    "MuleRouter route table is required": "Таблица маршрутов MuleRouter обязательна",
+    "MuleRouter route table must be a JSON object": "Таблица маршрутов MuleRouter должна быть объектом JSON",
+    "MuleRouter route table requires at least one route": "Таблица маршрутов MuleRouter требует хотя бы один маршрут",
+    "Every MuleRouter route requires vendor and model": "Каждый маршрут MuleRouter требует vendor и model",
+    "MuleRouter routes must map to distinct models": "Маршруты MuleRouter должны соответствовать разным моделям",
+    "Every billing var requires a name": "Каждая переменная тарификации требует name",
+    "Every billing var must be of kind int or enum": "Каждая переменная тарификации должна иметь kind int или enum",
+    "Every billing var requires a default": "Каждая переменная тарификации требует default",
+    "Every enum billing var requires values": "Переменная тарификации типа enum требует values",
+    "A billing var that contributes a multiplier must declare max or enum": "Переменная тарификации, дающая множитель, должна объявлять max или enum"
   }
 }
