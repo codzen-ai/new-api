@@ -62,10 +62,32 @@ func MuleRouterRequestConvert() func(c *gin.Context) {
 			abortWithMuleRouterError(c, http.StatusBadRequest, "invalid request body: "+err.Error())
 			return
 		}
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(jsonData))
-		c.Set(common.KeyRequestBody, jsonData)
+		if err := replaceRequestBody(c, jsonData); err != nil {
+			abortWithMuleRouterError(c, http.StatusInternalServerError, "rewrite request body failed: "+err.Error())
+			return
+		}
 		c.Next()
 	}
+}
+
+// replaceRequestBody swaps in the rewritten body for every downstream reader.
+//
+// Reading the original body above populated the cached body storage, and
+// common.GetRequestBody prefers that cache over both c.Request.Body and the
+// legacy KeyRequestBody entry. Setting only the latter would leave every
+// downstream reader — the distributor's model lookup first among them — looking
+// at the vendor's original body, which carries no model field at all.
+func replaceRequestBody(c *gin.Context, body []byte) error {
+	storage, err := common.CreateBodyStorage(body)
+	if err != nil {
+		return err
+	}
+	common.CleanupBodyStorage(c)
+	c.Set(common.KeyBodyStorage, storage)
+	c.Set(common.KeyRequestBody, body)
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	c.Request.ContentLength = int64(len(body))
+	return nil
 }
 
 func abortWithMuleRouterError(c *gin.Context, status int, detail string) {
