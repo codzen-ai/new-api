@@ -5318,6 +5318,18 @@
     "Zero retention": "零數據保留",
     "Zhipu": "智譜",
     "Zhipu V4": "智譜 V4",
-    "Zoom": "縮放"
+    "Zoom": "縮放",
+    "MuleRouter Routes": "MuleRouter 路由表",
+    "Route table in JSON. Each route maps /vendors/{vendor}/v1/{model}/{action} to the model name \"{vendor}/{model}/{action}\". Every request field that scales cost must be declared in billing_vars with bounds; undeclared cost fields are rejected at request time.": "JSON 格式的路由表。每條路由把 /vendors/{vendor}/v1/{model}/{action} 對應為模型名稱 \"{vendor}/{model}/{action}\"。任何影響成本的請求欄位都必須在 billing_vars 中宣告並給出取值範圍；未宣告的成本欄位會在請求時被拒絕。",
+    "MuleRouter route table is required": "必須填寫 MuleRouter 路由表",
+    "MuleRouter route table must be a JSON object": "MuleRouter 路由表必須是 JSON 物件",
+    "MuleRouter route table requires at least one route": "MuleRouter 路由表至少需要一條路由",
+    "Every MuleRouter route requires vendor and model": "每條 MuleRouter 路由都必須填寫 vendor 和 model",
+    "MuleRouter routes must map to distinct models": "MuleRouter 路由對應的模型名稱不能重複",
+    "Every billing var requires a name": "每個計費變數都必須填寫 name",
+    "Every billing var must be of kind int or enum": "計費變數的 kind 只能是 int 或 enum",
+    "Every billing var requires a default": "每個計費變數都必須填寫 default",
+    "Every enum billing var requires values": "enum 類型的計費變數必須填寫 values",
+    "A billing var that contributes a multiplier must declare max or enum": "參與計費倍率的計費變數必須宣告 max 或 enum"
   }
 }

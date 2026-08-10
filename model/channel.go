@@ -985,6 +985,14 @@ func (channel *Channel) ValidateSettings() error {
 			return err
 		}
 	}
+	if channel.Type == constant.ChannelTypeMuleRouter && channelOtherSettings.MuleRouter == nil {
+		return fmt.Errorf("mulerouter is required")
+	}
+	if channelOtherSettings.MuleRouter != nil {
+		if err := channelOtherSettings.MuleRouter.Validate(); err != nil {
+			return err
+		}
+	}
 	if channel.Type == constant.ChannelTypeAdvancedCustom && channelOtherSettings.UpstreamModelUpdateCheckEnabled {
 		if _, ok := channelOtherSettings.AdvancedCustom.ModelListRoute(); !ok {
 			return fmt.Errorf("advanced custom channels require a %s route when upstream model update checks are enabled", dto.AdvancedCustomModelListPath)

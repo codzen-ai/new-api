@@ -5318,6 +5318,18 @@
     "Zero retention": "Zero retention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "MuleRouter Routes": "MuleRouter Routes",
+    "Route table in JSON. Each route maps /vendors/{vendor}/v1/{model}/{action} to the model name \"{vendor}/{model}/{action}\". Every request field that scales cost must be declared in billing_vars with bounds; undeclared cost fields are rejected at request time.": "Route table in JSON. Each route maps /vendors/{vendor}/v1/{model}/{action} to the model name \"{vendor}/{model}/{action}\". Every request field that scales cost must be declared in billing_vars with bounds; undeclared cost fields are rejected at request time.",
+    "MuleRouter route table is required": "MuleRouter route table is required",
+    "MuleRouter route table must be a JSON object": "MuleRouter route table must be a JSON object",
+    "MuleRouter route table requires at least one route": "MuleRouter route table requires at least one route",
+    "Every MuleRouter route requires vendor and model": "Every MuleRouter route requires vendor and model",
+    "MuleRouter routes must map to distinct models": "MuleRouter routes must map to distinct models",
+    "Every billing var requires a name": "Every billing var requires a name",
+    "Every billing var must be of kind int or enum": "Every billing var must be of kind int or enum",
+    "Every billing var requires a default": "Every billing var requires a default",
+    "Every enum billing var requires values": "Every enum billing var requires values",
+    "A billing var that contributes a multiplier must declare max or enum": "A billing var that contributes a multiplier must declare max or enum"
   }
 }

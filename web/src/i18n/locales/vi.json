@@ -5318,6 +5318,18 @@
     "Zero retention": "Không lưu dữ liệu",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "MuleRouter Routes": "Tuyến MuleRouter",
+    "Route table in JSON. Each route maps /vendors/{vendor}/v1/{model}/{action} to the model name \"{vendor}/{model}/{action}\". Every request field that scales cost must be declared in billing_vars with bounds; undeclared cost fields are rejected at request time.": "Bảng tuyến ở dạng JSON. Mỗi tuyến ánh xạ /vendors/{vendor}/v1/{model}/{action} sang tên mô hình \"{vendor}/{model}/{action}\". Mọi trường yêu cầu ảnh hưởng đến chi phí đều phải được khai báo trong billing_vars kèm giới hạn; các trường chi phí chưa khai báo sẽ bị từ chối khi gửi yêu cầu.",
+    "MuleRouter route table is required": "Bắt buộc phải có bảng tuyến MuleRouter",
+    "MuleRouter route table must be a JSON object": "Bảng tuyến MuleRouter phải là một đối tượng JSON",
+    "MuleRouter route table requires at least one route": "Bảng tuyến MuleRouter cần ít nhất một tuyến",
+    "Every MuleRouter route requires vendor and model": "Mỗi tuyến MuleRouter đều cần vendor và model",
+    "MuleRouter routes must map to distinct models": "Các tuyến MuleRouter phải ánh xạ tới các mô hình khác nhau",
+    "Every billing var requires a name": "Mỗi biến tính phí đều cần name",
+    "Every billing var must be of kind int or enum": "Mỗi biến tính phí phải có kind là int hoặc enum",
+    "Every billing var requires a default": "Mỗi biến tính phí đều cần default",
+    "Every enum billing var requires values": "Biến tính phí kiểu enum cần có values",
+    "A billing var that contributes a multiplier must declare max or enum": "Biến tính phí tạo ra hệ số nhân phải khai báo max hoặc enum"
   }
 }
