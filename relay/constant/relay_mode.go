@@ -43,6 +43,10 @@ const (
 	RelayModeVideoFetchByID
 	RelayModeVideoSubmit
 
+	// RelayModeMuleRouterFetchByID renders a task in MuleRouter's own response
+	// shape rather than the OpenAI video or generic TaskDto shape.
+	RelayModeMuleRouterFetchByID
+
 	RelayModeRerank
 
 	RelayModeResponses
