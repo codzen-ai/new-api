@@ -2,17 +2,24 @@ package controller
 
 import (
 	"encoding/base64"
+	"encoding/csv"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
+	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // columnIndex returns the position of a column in logCSVHeader, failing the
@@ -639,4 +646,250 @@ func TestLogBillingColumnsReportsTier(t *testing.T) {
 			assert.Equal(t, tc.expectedTier, row[columnIndex(t, "tier")])
 		})
 	}
+}
+
+// TestVideoTaskRowsNetToTheCharge is the invariant a video statement rests on.
+// An asynchronous task holds an estimate on submit and settles the difference
+// minutes later, so its charge is spread over two rows; adding them up has to
+// land on what the task actually cost, in both directions. The figures are the
+// 480p case from guides/seedance-billing.md.
+func TestVideoTaskRowsNetToTheCharge(t *testing.T) {
+	require.Equal(t, 500*1000.0, common.QuotaPerUnit, "QuotaPerUnit drives the expected amounts in this test")
+	useCurrency(t, operation_setting.QuotaDisplayTypeUSD, 7)
+
+	const holdQuota, tokens = 750_000, 100_858
+	const requestId, taskId = "202608022213205551212", "task_To0oAtJorNK2Zm8Wg9hYvMTMMHUx"
+
+	tests := []struct {
+		name              string
+		settlementType    int
+		settlementQuota   int
+		actualQuota       int
+		expectedEntryType string
+	}{
+		{
+			name:              "the upstream used less than the hold",
+			settlementType:    model.LogTypeRefund,
+			settlementQuota:   598_086,
+			actualQuota:       151_914,
+			expectedEntryType: entryTypeRefund,
+		},
+		{
+			name:              "the upstream used more than the hold",
+			settlementType:    model.LogTypeConsume,
+			settlementQuota:   150_000,
+			actualQuota:       900_000,
+			expectedEntryType: entryTypeSettlement,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hold := logToCSVRow(&model.Log{
+				Type: model.LogTypeConsume, Quota: holdQuota,
+				RequestId: requestId, ModelName: "doubao-seedance-2-0-260128",
+				Other: fmt.Sprintf(`{"is_task":true,"task_id":%q,"model_price":0,"model_ratio":3,"group_ratio":1}`, taskId),
+			}, "USD", decimal.NewFromInt(1))
+
+			settlement := logToCSVRow(&model.Log{
+				Type: tc.settlementType, Quota: tc.settlementQuota, CompletionTokens: tokens,
+				RequestId: requestId, ModelName: "doubao-seedance-2-0-260128",
+				Other: fmt.Sprintf(`{"task_id":%q,"model_ratio":3,"group_ratio":1,"pre_consumed_quota":%d,"actual_quota":%d}`,
+					taskId, holdQuota, tc.actualQuota),
+			}, "USD", decimal.NewFromInt(1))
+
+			// Both rows carry the identifiers that make them one charge.
+			for _, row := range [][]string{hold, settlement} {
+				assert.Equal(t, requestId, row[columnIndex(t, "request_id")])
+				assert.Equal(t, taskId, row[columnIndex(t, "task_id")])
+			}
+
+			// The hold is an estimate taken before any usage was reported, so it
+			// states no tokens and no unit price — quoting one against zero tokens
+			// is how a 4.9× overstatement used to read as an itemised charge.
+			assert.Equal(t, entryTypePrepaidHold, hold[columnIndex(t, "entry_type")])
+			assert.Empty(t, hold[columnIndex(t, "input_tokens")])
+			assert.Empty(t, hold[columnIndex(t, "output_tokens")])
+			assert.Empty(t, hold[columnIndex(t, "calculation")])
+			assert.InDelta(t, float64(holdQuota)/common.QuotaPerUnit, amountAt(t, hold, "total_amount"), 1e-9)
+			assert.InDelta(t, amountAt(t, hold, "total_amount"), amountAt(t, hold, "other_amount"), 1e-9)
+
+			// The settlement states the usage it priced, and its remainder is the
+			// hold it reverses — which is why the pair nets to the charge.
+			assert.Equal(t, tc.expectedEntryType, settlement[columnIndex(t, "entry_type")])
+			assert.Equal(t, strconv.Itoa(tokens), settlement[columnIndex(t, "output_tokens")])
+			assert.InDelta(t, float64(tc.actualQuota)/common.QuotaPerUnit, amountAt(t, settlement, "output_amount"), 1e-9)
+			assert.InDelta(t, -float64(holdQuota)/common.QuotaPerUnit, amountAt(t, settlement, "other_amount"), 1e-9)
+			assert.NotEmpty(t, settlement[columnIndex(t, "calculation")])
+
+			// A refund returns money, so it has to enter the statement negative.
+			expectedSettlement := float64(tc.settlementQuota) / common.QuotaPerUnit
+			if tc.settlementType == model.LogTypeRefund {
+				expectedSettlement = -expectedSettlement
+			}
+			assert.InDelta(t, expectedSettlement, amountAt(t, settlement, "total_amount"), 1e-9)
+
+			components := amountAt(t, settlement, "output_amount") + amountAt(t, settlement, "other_amount")
+			assert.InDelta(t, amountAt(t, settlement, "total_amount"), components, 1e-9,
+				"components must add up to the row's amount")
+
+			assert.InDelta(t, float64(tc.actualQuota)/common.QuotaPerUnit,
+				amountAt(t, hold, "total_amount")+amountAt(t, settlement, "total_amount"), 1e-9,
+				"the task's rows must net to what the task cost")
+		})
+	}
+}
+
+// TestLogEntryTypeNamesTheRow covers the column that tells an estimate apart from
+// the charge that replaced it. Getting this wrong in either direction misreports
+// money: a hold read as a charge overstates the bill, and a fixed-price task read
+// as a hold implies a correction that never comes.
+func TestLogEntryTypeNamesTheRow(t *testing.T) {
+	useCurrency(t, operation_setting.QuotaDisplayTypeUSD, 7)
+
+	tests := []struct {
+		name                string
+		log                 *model.Log
+		expectedEntryType   string
+		expectedBillingMode string
+	}{
+		{
+			name:                "a plain request is one charge",
+			log:                 &model.Log{Type: model.LogTypeConsume, PromptTokens: 1000, CompletionTokens: 500, Quota: 5000, Other: `{"model_ratio":2,"group_ratio":1,"completion_ratio":3}`},
+			expectedEntryType:   entryTypeConsume,
+			expectedBillingMode: "per_token",
+		},
+		{
+			name:                "a per-token task holds an estimate",
+			log:                 &model.Log{Type: model.LogTypeConsume, Quota: 750000, Other: `{"is_task":true,"task_id":"task_a","model_price":0,"model_ratio":3,"group_ratio":1}`},
+			expectedEntryType:   entryTypePrepaidHold,
+			expectedBillingMode: "per_token",
+		},
+		{
+			// A fixed price is final at submit time and never gets a second row.
+			name:                "a per-call task is charged outright",
+			log:                 &model.Log{Type: model.LogTypeConsume, Quota: 25000, Other: `{"is_task":true,"task_id":"task_b","model_price":0.05,"group_ratio":1}`},
+			expectedEntryType:   entryTypeConsume,
+			expectedBillingMode: "per_call",
+		},
+		{
+			name:                "an under-estimated task settles the difference",
+			log:                 &model.Log{Type: model.LogTypeConsume, Quota: 150000, CompletionTokens: 300000, Other: `{"task_id":"task_c","model_ratio":3,"group_ratio":1,"pre_consumed_quota":750000,"actual_quota":900000}`},
+			expectedEntryType:   entryTypeSettlement,
+			expectedBillingMode: "per_token",
+		},
+		{
+			name:                "a failed task refunds its hold",
+			log:                 &model.Log{Type: model.LogTypeRefund, Quota: 750000, Other: `{"task_id":"task_d","model_ratio":3,"group_ratio":1,"reason":"upstream error"}`},
+			expectedEntryType:   entryTypeRefund,
+			expectedBillingMode: "per_token",
+		},
+		{
+			name:                "a failed per-call task refunds its price",
+			log:                 &model.Log{Type: model.LogTypeRefund, Quota: 25000, Other: `{"task_id":"task_e","model_price":0.05,"group_ratio":1,"reason":"构图失败"}`},
+			expectedEntryType:   entryTypeRefund,
+			expectedBillingMode: "per_call",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row := logToCSVRow(tc.log, "USD", decimal.NewFromInt(1))
+
+			assert.Equal(t, tc.expectedEntryType, row[columnIndex(t, "entry_type")])
+			assert.Equal(t, tc.expectedBillingMode, row[columnIndex(t, "billing_mode")])
+
+			// Whatever the row is, its components still have to add up to it.
+			components := amountAt(t, row, "input_amount") +
+				amountAt(t, row, "cache_read_amount") +
+				amountAt(t, row, "cache_write_amount") +
+				amountAt(t, row, "output_amount") +
+				amountAt(t, row, "other_amount")
+			assert.InDelta(t, amountAt(t, row, "total_amount"), components, 1e-9)
+
+			expectedTotal := float64(tc.log.Quota) / common.QuotaPerUnit
+			if tc.log.Type == model.LogTypeRefund {
+				expectedTotal = -expectedTotal
+			}
+			assert.InDelta(t, expectedTotal, amountAt(t, row, "total_amount"), 1e-9)
+		})
+	}
+}
+
+// openLogExportTestDB points the log queries at a private in-memory database for
+// the duration of one test.
+func openLogExportTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	common.RedisEnabled = false
+
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+
+	originalDB, originalLogDB := model.DB, model.LOG_DB
+	model.DB, model.LOG_DB = db, db
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = originalDB, originalLogDB
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	return db
+}
+
+// TestExportAllLogsCarriesTheRefundsThatOffsetConsumption locks the reason a
+// statement is exported by type rather than filtered like the log view: an
+// asynchronous task is charged in two records, and consume rows alone bill every
+// video at the estimate taken before it ran. Nothing else may come along for the
+// ride — a top-up in the file would read as consumption.
+func TestExportAllLogsCarriesTheRefundsThatOffsetConsumption(t *testing.T) {
+	require.Equal(t, 500*1000.0, common.QuotaPerUnit, "QuotaPerUnit drives the expected amounts in this test")
+	useCurrency(t, operation_setting.QuotaDisplayTypeUSD, 7)
+	db := openLogExportTestDB(t)
+
+	const holdQuota, refundQuota, actualQuota, textQuota = 750_000, 598_086, 151_914, 5_000
+	taskOther := `{"is_task":true,"task_id":"task_a","model_price":0,"model_ratio":3,"group_ratio":1}`
+	settlementOther := fmt.Sprintf(`{"task_id":"task_a","model_ratio":3,"group_ratio":1,"pre_consumed_quota":%d,"actual_quota":%d}`, holdQuota, actualQuota)
+
+	for _, l := range []*model.Log{
+		{Type: model.LogTypeConsume, Username: "u", ModelName: "gpt-5.5", Quota: textQuota, PromptTokens: 1000, CompletionTokens: 500, CreatedAt: 1785680000, RequestId: "req-text", Other: `{"model_ratio":2,"group_ratio":1,"completion_ratio":3}`},
+		{Type: model.LogTypeConsume, Username: "u", ModelName: "doubao-seedance-2-0", Quota: holdQuota, CreatedAt: 1785680006, RequestId: "req-video", Other: taskOther},
+		{Type: model.LogTypeRefund, Username: "u", ModelName: "doubao-seedance-2-0", Quota: refundQuota, CompletionTokens: 100858, CreatedAt: 1785680214, RequestId: "req-video", Other: settlementOther},
+		{Type: model.LogTypeTopup, Username: "u", Quota: 1_000_000, CreatedAt: 1785680300, RequestId: "req-topup"},
+		{Type: model.LogTypeError, Username: "u", ModelName: "gpt-5.5", CreatedAt: 1785680400, RequestId: "req-error"},
+	} {
+		require.NoError(t, db.Create(l).Error)
+	}
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/log/export/csv?type=2", nil)
+
+	ExportAllLogs(c)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	// Excel needs the UTF-8 BOM the exporter writes; the parser must not see it.
+	rows, err := csv.NewReader(strings.NewReader(strings.TrimPrefix(recorder.Body.String(), "\ufeff"))).ReadAll()
+	require.NoError(t, err)
+	require.Equal(t, logCSVHeader, rows[0])
+
+	total := 0.0
+	var entryTypes, requestIds []string
+	for _, row := range rows[1:] {
+		total += amountAt(t, row, "total_amount")
+		entryTypes = append(entryTypes, row[columnIndex(t, "entry_type")])
+		requestIds = append(requestIds, row[columnIndex(t, "request_id")])
+	}
+
+	assert.ElementsMatch(t, []string{entryTypeConsume, entryTypePrepaidHold, entryTypeRefund}, entryTypes,
+		"the task's hold and its refund both belong on the statement")
+	assert.NotContains(t, requestIds, "req-topup", "a top-up would read as consumption")
+	assert.NotContains(t, requestIds, "req-error", "an error log is not a charge")
+	assert.InDelta(t, float64(textQuota+actualQuota)/common.QuotaPerUnit, total, 1e-9,
+		"the file must sum to what was charged, not to the estimates")
 }

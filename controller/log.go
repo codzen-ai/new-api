@@ -172,8 +172,14 @@ const logExportMaxCount = 100_000
 //
 // Prices are per 1M tokens, in the currency the site displays elsewhere, so the
 // figures match what the customer sees in the web UI.
+//
+// A charge can also span several rows. An asynchronous task holds an estimate on
+// submit and settles the difference when it finishes, so entry_type says what a
+// row is and task_id groups the rows of one task; the amounts are signed, so
+// summing total_amount over the group — or over the whole file — gives what was
+// actually charged.
 var logCSVHeader = []string{
-	"time", "request_id", "username", "token_name", "model", "billing_mode", "tier",
+	"time", "request_id", "username", "token_name", "model", "task_id", "entry_type", "billing_mode", "tier",
 	"input_tokens", "input_price_per_1m", "input_amount",
 	"cache_read_tokens", "cache_read_price_per_1m", "cache_read_amount",
 	"cache_write_tokens", "cache_write_price_per_1m", "cache_write_amount",
@@ -205,13 +211,15 @@ func exportCurrency() (string, decimal.Decimal) {
 }
 
 // logBillingColumnCount is the number of columns produced by logBillingColumns:
-// the billing mode and tier, four token/price/amount triples, the other and
-// total amounts, and the arithmetic tying them together.
-const logBillingColumnCount = 17
+// the task id, entry type, billing mode and tier, four token/price/amount
+// triples, the other and total amounts, and the arithmetic tying them together.
+const logBillingColumnCount = 19
 
 // Column offsets within the slice logBillingColumns returns.
 const (
-	colBillingMode = iota
+	colTaskId = iota
+	colEntryType
+	colBillingMode
 	colTier
 	colInputTokens
 	colInputPrice
@@ -228,6 +236,16 @@ const (
 	colOtherAmount
 	colCalculation
 	colTotalAmount
+)
+
+// What a row is within its charge. A plain request is one consume row and needs
+// no explanation; a task splits into a hold taken on submit and the settlement
+// that corrects it minutes later, and those two only make sense as a pair.
+const (
+	entryTypeConsume     = "consume"
+	entryTypePrepaidHold = "prepaid_hold"
+	entryTypeSettlement  = "settlement"
+	entryTypeRefund      = "refund"
 )
 
 // logBillingColumns splits a log's charge into the components a customer can
@@ -252,7 +270,13 @@ const (
 // other_amount. An empty cell means "not applicable here", never a measured zero.
 func logBillingColumns(l *model.Log, rate decimal.Decimal) []string {
 	cols := make([]string, logBillingColumnCount)
+	// A refund returns money, so it enters the statement as a negative amount.
+	// The log stores every quota as a magnitude, which would otherwise make a
+	// settled task read as if it had been charged twice.
 	totalQuota := decimal.NewFromInt(int64(l.Quota))
+	if l.Type == model.LogTypeRefund {
+		totalQuota = totalQuota.Neg()
+	}
 	cols[colTotalAmount] = quotaToAmount(totalQuota, rate)
 
 	other := map[string]any{}
@@ -269,9 +293,21 @@ func logBillingColumns(l *model.Log, rate decimal.Decimal) []string {
 		return decimal.NewFromFloat(value), true
 	}
 
+	taskId, _ := other["task_id"].(string)
+	cols[colTaskId] = spreadsheetSafe(taskId)
+
+	modelPrice, hasModelPrice := number("model_price")
+	perCall := hasModelPrice && modelPrice.IsPositive()
 	cols[colBillingMode] = "per_token"
-	if modelPrice, ok := number("model_price"); ok && modelPrice.IsPositive() {
+	if perCall {
 		cols[colBillingMode] = "per_call"
+	}
+
+	cols[colEntryType] = logEntryType(l, other, perCall)
+	if settlementBillingColumns(cols, l, other, totalQuota, rate) {
+		return cols
+	}
+	if perCall {
 		cols[colOtherAmount] = quotaToAmount(totalQuota, rate)
 		return cols
 	}
@@ -371,6 +407,63 @@ func logBillingColumns(l *model.Log, rate decimal.Decimal) []string {
 	accounted := inputQuota.Add(cacheReadQuota).Add(cacheWriteQuota).Add(outputQuota)
 	cols[colOtherAmount] = quotaToAmount(totalQuota.Sub(accounted), rate)
 	return cols
+}
+
+// logEntryType names what a row is within the charge it belongs to. A plain
+// request is a single consume row, but an asynchronous task (video generation
+// and the like) charges an estimate when it is submitted and corrects it with a
+// second row minutes later, once the upstream reports what was actually used.
+// Without this column a statement reader cannot tell the estimate apart from the
+// correction, and reads a task's hold as its price.
+//
+// Per-call tasks are excluded: a fixed price is final at submit time and never
+// gets a second row, so that charge is an ordinary consume entry.
+func logEntryType(l *model.Log, other map[string]any, perCall bool) string {
+	if l.Type == model.LogTypeRefund {
+		return entryTypeRefund
+	}
+	if _, hasHold := other["pre_consumed_quota"]; hasHold {
+		return entryTypeSettlement
+	}
+	if isTask, _ := other["is_task"].(bool); isTask && !perCall {
+		return entryTypePrepaidHold
+	}
+	return entryTypeConsume
+}
+
+// settlementBillingColumns fills the breakdown for the rows a two-step charge
+// produces — the hold taken when an asynchronous task is submitted, and the
+// settlement or refund that corrects it. Neither row is a priced request on its
+// own, so neither can be itemised the way logBillingColumns itemises a request.
+//
+// A settlement that knows the usage it was computed from states it: the amount
+// finally settled goes on the output line at the price it works out to, and the
+// remainder is the hold this row reverses — negative, which is exactly why the
+// rows of one task sum to what the task cost. A hold, or a settlement whose
+// usage the upstream never returned, has nothing to price against and reports
+// its amount whole instead of quoting a unit price against zero tokens.
+//
+// Returns false for an ordinary consume row, leaving cols to the caller.
+func settlementBillingColumns(cols []string, l *model.Log, other map[string]any, totalQuota, rate decimal.Decimal) bool {
+	switch cols[colEntryType] {
+	case entryTypePrepaidHold, entryTypeSettlement, entryTypeRefund:
+	default:
+		return false
+	}
+
+	settledQuota, hasSettled := other["actual_quota"].(float64)
+	tokens := decimal.NewFromInt(int64(l.CompletionTokens))
+	if !hasSettled || settledQuota <= 0 || !tokens.IsPositive() {
+		cols[colOtherAmount] = quotaToAmount(totalQuota, rate)
+		return true
+	}
+
+	settled := decimal.NewFromFloat(settledQuota)
+	cols[colOutputTokens] = tokens.String()
+	cols[colOutputPrice] = quotaToAmount(settled.Div(tokens).Mul(tokensPerPriceUnit), rate)
+	cols[colOutputAmount] = quotaToAmount(settled, rate)
+	cols[colOtherAmount] = quotaToAmount(totalQuota.Sub(settled), rate)
+	return true
 }
 
 // tieredBillingColumns fills the breakdown for a log priced by a billing
@@ -636,7 +729,22 @@ func ExportAllLogs(c *gin.Context) {
 	requestId := c.Query("request_id")
 	upstreamRequestId := c.Query("upstream_request_id")
 
-	total, err := model.CountAllLogsForExport(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
+	// A statement has to be net. An asynchronous task charges an estimate when it
+	// is submitted and settles the difference minutes later, so consume rows on
+	// their own bill every video at its estimate — which for a short clip is
+	// several times what it cost. The refunds that offset them are therefore
+	// exported alongside, carrying a negative amount, and entry_type tells the
+	// reader which row is which. This is the one place the file deliberately
+	// holds more than the log view on screen.
+	logTypes := []int{logType}
+	switch logType {
+	case model.LogTypeUnknown:
+		logTypes = nil
+	case model.LogTypeConsume:
+		logTypes = []int{model.LogTypeConsume, model.LogTypeRefund}
+	}
+
+	total, err := model.CountAllLogsForExport(logTypes, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
 		return
@@ -666,7 +774,7 @@ func ExportAllLogs(c *gin.Context) {
 	currency, rate := exportCurrency()
 
 	err = model.StreamAllLogsForExport(
-		logType, startTimestamp, endTimestamp,
+		logTypes, startTimestamp, endTimestamp,
 		modelName, username, tokenName,
 		channel, group, requestId, upstreamRequestId,
 		1000,
