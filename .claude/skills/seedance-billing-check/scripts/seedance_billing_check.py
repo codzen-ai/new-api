@@ -593,10 +593,10 @@ def print_results(report):
 
     recon = report["reconciliation"]
     print("\n--- 额度对账 ---")
-    print(
-        f"  {symbols[recon['passed']]:<4} quota_reconciled           "
-        f"余额减少 {recon['quota_spent']}，各档位扣费之和 {recon['sum_actual_quota']}"
-    )
+    detail = f"余额减少 {recon['quota_spent']}，各档位扣费之和 {recon['sum_actual_quota']}"
+    if recon["passed"] is False:
+        detail += f"，差 {recon['quota_spent'] - recon['sum_actual_quota']}（已等退款入账至超时）"
+    print(f"  {symbols[recon['passed']]:<4} quota_reconciled           {detail}")
     failed = [
         (c["case"], chk["name"])
         for c in report["cases"]
@@ -687,18 +687,29 @@ def main():
             video_url = result["video_url"]
             print(f"    用该档位产出的视频作为含视频输入档位的素材: {video_url[:80]}...")
 
-    user_after = client.admin_get("/api/user/self") or {}
-    quota_after = int(user_after.get("quota") or 0)
-    spent = ctx["quota_before"] - quota_after
     sum_actual = sum(
         int((c.get("settlement") or {}).get("actual_quota") or 0) for c in report["cases"]
     )
+    # The settlement log lands before the refund reaches the balance, so reading
+    # the balance the moment settlement is visible sees the full pre-consumed
+    # hold still deducted and reports a leak that does not exist. Wait for the
+    # balance to come down to the charges the logs account for.
+    tolerance = len(report["cases"])
+    deadline = time.monotonic() + args.settle_timeout
+    while True:
+        user_after = client.admin_get("/api/user/self") or {}
+        quota_after = int(user_after.get("quota") or 0)
+        spent = ctx["quota_before"] - quota_after
+        if abs(spent - sum_actual) <= tolerance or time.monotonic() >= deadline:
+            break
+        time.sleep(3)
+
     report["reconciliation"] = {
         "quota_before": ctx["quota_before"],
         "quota_after": quota_after,
         "quota_spent": spent,
         "sum_actual_quota": sum_actual,
-        "passed": abs(spent - sum_actual) <= len(report["cases"]),
+        "passed": abs(spent - sum_actual) <= tolerance,
     }
     report["spent_cny_official_rate"] = round(
         spent / ctx["quota_per_unit"] * ctx["usd_exchange_rate"], 2
