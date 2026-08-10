@@ -292,6 +292,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 		TokenId:   task.PrivateData.TokenId,
 		Group:     task.Group,
 		Other:     other,
+		RequestId: task.PrivateData.RequestID,
 	})
 
 	// 5. 资金退款完成后再清除持久化标记。
@@ -303,11 +304,24 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 	return true
 }
 
+// TaskSettlement 描述一次任务差额结算的输入。
+type TaskSettlement struct {
+	ActualQuota int             // 任务完成后的实际应扣额度
+	Tokens      int             // 上游返回的计费用量；0 表示上游未提供（例如 adaptor 直接给出额度）
+	Reason      *common.Message // 结算原因，写入日志 content
+	// Clamp 记录计算 ActualQuota 时发生的额度饱和，非 nil 时写入日志
+	// admin_info（仅管理员可见）。
+	Clamp *common.QuotaClamp
+}
+
 // RecalculateTaskQuota 通用的异步差额结算。
-// actualQuota 是任务完成后的实际应扣额度，与预扣额度 (task.Quota) 做差额结算。
-// reason 写入日志内容（例如按 token 重算或 adaptor 调整）。
-// clamps 可选：若计算 actualQuota 时发生额度饱和，将其记入日志 admin_info（仅管理员可见）。
-func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason *common.Message, clamps ...*common.QuotaClamp) {
+// settlement.ActualQuota 是任务完成后的实际应扣额度，与预扣额度 (task.Quota) 做差额结算。
+//
+// 差额单独记一条日志（补扣记消费、退还记退款），与提交时的预扣日志共用 request_id
+// 和 task_id，因此一笔任务的实际扣费是这两条记录的净额。
+func RecalculateTaskQuota(ctx context.Context, task *model.Task, settlement TaskSettlement) {
+	actualQuota := settlement.ActualQuota
+	reason := settlement.Reason
 	if actualQuota < 0 {
 		return
 	}
@@ -359,20 +373,20 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 	other.SetPublic("task_id", task.TaskID)
 	other.SetPublic("pre_consumed_quota", preConsumedQuota)
 	other.SetPublic("actual_quota", actualQuota)
-	for _, clamp := range clamps {
-		attachQuotaSaturationToOther(other, clamp)
-	}
+	attachQuotaSaturationToOther(other, settlement.Clamp)
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-		UserId:    task.UserId,
-		LogType:   logType,
-		Content:   []*common.Message{reason},
-		ChannelId: task.ChannelId,
-		ModelName: taskModelName(task),
-		Quota:     logQuota,
-		TokenId:   task.PrivateData.TokenId,
-		Group:     task.Group,
-		Other:     other,
-		NodeName:  task.PrivateData.NodeName,
+		UserId:           task.UserId,
+		LogType:          logType,
+		Content:          []*common.Message{reason},
+		ChannelId:        task.ChannelId,
+		ModelName:        taskModelName(task),
+		Quota:            logQuota,
+		TokenId:          task.PrivateData.TokenId,
+		Group:            task.Group,
+		Other:            other,
+		NodeName:         task.PrivateData.NodeName,
+		RequestId:        task.PrivateData.RequestID,
+		CompletionTokens: settlement.Tokens,
 	})
 }
 
@@ -430,7 +444,12 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 		"group_ratio":      fmt.Sprintf("%.2f", finalGroupRatio),
 		"other_multiplier": fmt.Sprintf("%.4f", otherMultiplier),
 	})
-	RecalculateTaskQuota(ctx, task, actualQuota, reason, clamp)
+	RecalculateTaskQuota(ctx, task, TaskSettlement{
+		ActualQuota: actualQuota,
+		Tokens:      totalTokens,
+		Reason:      reason,
+		Clamp:       clamp,
+	})
 	return true
 }
 
