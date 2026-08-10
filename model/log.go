@@ -421,6 +421,11 @@ type RecordTaskBillingLogParams struct {
 	Group     string
 	Other     *LogOther
 	NodeName  string // 任务发起节点；为空时回退当前节点
+	// RequestId 是提交任务那次请求的 ID。异步任务的扣费分成提交与结算两条日志，
+	// 共用同一个 request_id 才能在用量日志和对账单里归为同一笔。
+	RequestId string
+	// CompletionTokens 是上游返回的计费用量；仅结算日志有，0 表示上游未提供。
+	CompletionTokens int
 }
 
 func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
@@ -437,18 +442,20 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	createdAt := common.GetTimestamp()
 	other := params.Other
 	log := &Log{
-		UserId:    params.UserId,
-		Username:  username,
-		CreatedAt: createdAt,
-		Type:      params.LogType,
-		Content:   other.setContent(params.Content),
-		TokenName: tokenName,
-		ModelName: params.ModelName,
-		Quota:     params.Quota,
-		ChannelId: params.ChannelId,
-		TokenId:   params.TokenId,
-		Group:     params.Group,
-		Other:     other.JSONString(),
+		UserId:           params.UserId,
+		Username:         username,
+		CreatedAt:        createdAt,
+		Type:             params.LogType,
+		Content:          other.setContent(params.Content),
+		TokenName:        tokenName,
+		ModelName:        params.ModelName,
+		Quota:            params.Quota,
+		CompletionTokens: params.CompletionTokens,
+		ChannelId:        params.ChannelId,
+		TokenId:          params.TokenId,
+		Group:            params.Group,
+		RequestId:        params.RequestId,
+		Other:            other.JSONString(),
 	}
 	err := createLog(log)
 	if err != nil {
@@ -465,6 +472,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 			ModelName: params.ModelName,
 			Quota:     params.Quota,
 			CreatedAt: createdAt,
+			TokenUsed: params.CompletionTokens,
 			UseGroup:  params.Group,
 			TokenID:   params.TokenId,
 			ChannelID: params.ChannelId,
@@ -588,12 +596,16 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 }
 
 // buildLogExportQuery constructs the shared WHERE conditions for log export queries.
-func buildLogExportQuery(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string) (*gorm.DB, error) {
+// An empty logTypes matches every type, mirroring the "all" filter in the UI.
+func buildLogExportQuery(logTypes []int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string) (*gorm.DB, error) {
 	var tx *gorm.DB
-	if logType == LogTypeUnknown {
+	switch len(logTypes) {
+	case 0:
 		tx = LOG_DB
-	} else {
-		tx = LOG_DB.Where("logs.type = ?", logType)
+	case 1:
+		tx = LOG_DB.Where("logs.type = ?", logTypes[0])
+	default:
+		tx = LOG_DB.Where("logs.type IN ?", logTypes)
 	}
 	var err error
 	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
@@ -665,8 +677,8 @@ func fillLogsChannelName(logs []*Log) {
 }
 
 // CountAllLogsForExport returns the total number of logs matching the given filters.
-func CountAllLogsForExport(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string) (int64, error) {
-	tx, err := buildLogExportQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
+func CountAllLogsForExport(logTypes []int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string) (int64, error) {
+	tx, err := buildLogExportQuery(logTypes, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
 	if err != nil {
 		return 0, err
 	}
@@ -677,11 +689,11 @@ func CountAllLogsForExport(logType int, startTimestamp, endTimestamp int64, mode
 
 // StreamAllLogsForExport iterates over all matching logs in cursor-based batches
 // and calls handler for each batch. Stops early if handler returns an error.
-func StreamAllLogsForExport(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string, batchSize int, handler func([]*Log) error) error {
+func StreamAllLogsForExport(logTypes []int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string, batchSize int, handler func([]*Log) error) error {
 	lastId := 0 // 0 means no cursor yet (we use id > 0 for the very first batch)
 	for {
 		var batch []*Log
-		tx, err := buildLogExportQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
+		tx, err := buildLogExportQuery(logTypes, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
 		if err != nil {
 			return err
 		}

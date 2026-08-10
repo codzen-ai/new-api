@@ -700,7 +700,7 @@ func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor
 		}
 		bc.TieredSnapshot.UsageFacts = usageFacts
 		bc.TieredSnapshot.EstimatedTier = result.MatchedTier
-		RecalculateTaskQuota(ctx, task, result.ActualQuotaAfterGroup, common.NewMessage("Settled by the task usage expression"), result.Clamp)
+		RecalculateTaskQuota(ctx, task, TaskSettlement{ActualQuota: result.ActualQuotaAfterGroup, Reason: common.NewMessage("Settled by the task usage expression"), Clamp: result.Clamp})
 		return true
 	}
 	// 按次计费的成功任务保持预扣；失败任务由调用方全额退款。
@@ -710,7 +710,7 @@ func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor
 	}
 	// 优先让 adaptor 决定最终额度。
 	if actualQuota := adaptor.AdjustBillingOnComplete(task, taskResult); actualQuota > 0 {
-		RecalculateTaskQuota(ctx, task, actualQuota, common.NewMessage("Adjusted by the channel adaptor"))
+		RecalculateTaskQuota(ctx, task, TaskSettlement{ActualQuota: actualQuota, Reason: common.NewMessage("Adjusted by the channel adaptor")})
 		return true
 	}
 	// 回退到 token 重算。
