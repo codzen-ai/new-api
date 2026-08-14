@@ -44,7 +44,7 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 这一步跑预检和护栏检查，一分钱不花：
 
 - **预检**读 `/api/pricing` 确认每个待测模型都配了固定价格、价格不低于上游成本价，读分组倍率和当前余额，列出本轮预算；
-- **护栏检查**发六个应当被拒的请求（未声明的 `n`、枚举外的 `duration`、包装过的巨大整数、越界的 `width`、未登记的模型、无令牌），然后**比对护栏前后的余额**——没变才说明这些请求确实死在扣费之前。
+- **护栏检查**发七个应当被拒的请求（未声明的 `n`、枚举外的 `duration`、包装过的巨大整数、越界的 `width`、未登记的模型、厂商原生路径、无令牌），然后**比对护栏前后的余额**——没变才说明这些请求确实死在扣费之前。
 
 把预算念给用户听，再问要不要继续。任何护栏失败都先停下来查，别急着花钱。
 
@@ -64,11 +64,11 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 需要输入图的用例（`qwen-edit`、`wan-*`）会自动排到后面，用前面 z-image 的产出当输入。想固定输入图就传 `--image-url`。
 
-单个用例的链路是：提交 → 断言 202 和本站任务 ID → 轮询到终态 → 读消费日志 → 复算扣费。视频用例慢，`--poll-timeout` 默认 600 秒。
+单个用例的链路是：提交 → 断言 200 和本站任务 ID → 轮询到终态 → 读消费日志 → 复算扣费。视频用例慢，`--poll-timeout` 默认 600 秒。
 
 ### 第 3 步：读结果
 
-每个用例六项断言，完整数据写进 `--out`（默认 `/tmp/mulerouter-smoke-report.json`）：
+每个用例七项断言，完整数据写进 `--out`（默认 `/tmp/mulerouter-smoke-report.json`）：
 
 | 断言 | 检查什么 | 失败意味着 |
 |---|---|---|
@@ -116,4 +116,4 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 ## 上游价目
 
-脚本内置的 `UPSTREAM_BASE_PRICE` 是上游成本价（$0.04 / $0.013 / $0.10 基准档），只用于预检时警告"配置价低于成本价"，不参与断言 —— 加价多少是运营决策。上游调价后同步更新那个表，方案文档 `specifications/mulerouter-async-task-gateway.md` 第 9 节有价目来源。
+脚本内置的 `UPSTREAM_BASE_PRICE` 是上游基准单位价（图片按张 $0.04 / $0.013，视频按秒 $0.02），只用于预检时警告"配置价低于成本价"，不参与断言 —— 加价多少是运营决策。上游调价后同步更新那个表，方案文档 `specifications/mulerouter-async-task-gateway.md` 第 9 节有价目来源。
