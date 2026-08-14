@@ -319,98 +319,81 @@ HTTP 状态码非 2xx，响应体形如：
 
 ## 完整示例
 
-### Bash
+两条 curl 就够了：一条提交拿任务 ID，一条查询取结果。中间等几十秒再查即可。
+
+### 第一条：提交
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-BASE_URL="${BASE_URL:?}"
-API_KEY="${API_KEY:?}"
-
-# 1. 提交
-resp=$(curl -sS -X POST "$BASE_URL/v1/video/generations" \
+curl -X POST "$BASE_URL/v1/video/generations" \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"z-image-spicy","prompt":"一只三花猫趴在窗台上","width":1024,"height":1024}')
-
-task_id=$(echo "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-echo "任务已提交：$task_id"
-
-# 2. 轮询
-while true; do
-  sleep 5
-  data=$(curl -sS "$BASE_URL/v1/video/generations/$task_id" \
-    -H "Authorization: Bearer $API_KEY" \
-    | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d["status"], d.get("result_url",""), d.get("fail_reason",""), sep="\t")')
-  status=$(echo "$data" | cut -f1)
-  echo "状态：$status"
-  case "$status" in
-    SUCCESS) echo "结果：$(echo "$data" | cut -f2)"; break ;;
-    FAILURE) echo "失败：$(echo "$data" | cut -f3)" >&2; exit 1 ;;
-  esac
-done
-```
-
-### Python
-
-```python
-import os
-import time
-
-import requests
-
-BASE_URL = os.environ["BASE_URL"].rstrip("/")
-API_KEY = os.environ["API_KEY"]
-HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-
-
-def generate(payload: dict, poll_interval: int = 5, timeout: int = 900) -> str:
-    """提交任务并等待完成，返回产物链接。"""
-    resp = requests.post(f"{BASE_URL}/v1/video/generations",
-                         headers=HEADERS, json=payload, timeout=60)
-    resp.raise_for_status()
-    task_id = resp.json()["id"]
-    print(f"任务已提交：{task_id}")
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        time.sleep(poll_interval)
-        data = requests.get(f"{BASE_URL}/v1/video/generations/{task_id}",
-                            headers=HEADERS, timeout=60).json()["data"]
-        print(f"状态：{data['status']}")
-
-        if data["status"] == "SUCCESS":
-            return data["result_url"]
-        if data["status"] == "FAILURE":
-            raise RuntimeError(f"任务失败：{data.get('fail_reason')}")
-
-    raise TimeoutError(f"任务 {task_id} 超过 {timeout} 秒仍未完成")
-
-
-# 文生图
-print(generate({
+  -d '{
     "model": "z-image-spicy",
     "prompt": "一只三花猫趴在洒满阳光的窗台上",
     "width": 1024,
-    "height": 1024,
-}))
+    "height": 1024
+  }'
+```
 
+```json
+{
+  "id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
+  "task_id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
+  "object": "video",
+  "model": "z-image-spicy",
+  "status": "queued",
+  "progress": 0,
+  "created_at": 1786714838
+}
+```
+
+### 第二条：查询
+
+把上一步的 `id` 填进路径。图片等 15 秒左右再查，视频等 1 分钟左右。
+
+```bash
+curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+```json
+{
+  "code": "success",
+  "message": "",
+  "data": {
+    "task_id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
+    "status": "SUCCESS",
+    "progress": "100%",
+    "result_url": "https://.../result_00.png",
+    "fail_reason": "",
+    "submit_time": 1786714838,
+    "finish_time": 1786714902
+  }
+}
+```
+
+`status` 还不是 `SUCCESS` 就过一会儿再执行同一条 curl，直到变成 `SUCCESS`（取 `result_url`）或 `FAILURE`（看 `fail_reason`）。
+
+### 换成另外两个模型
+
+提交那条 curl 换 `model` 和参数即可，查询那条完全一样。
+
+```bash
 # 图生图
-print(generate({
-    "model": "qwen-image-edit-spicy",
-    "image": "https://example.com/photo.png",
-    "prompt": "把背景换成雪山",
-}))
+-d '{
+  "model": "qwen-image-edit-spicy",
+  "image": "https://example.com/photo.png",
+  "prompt": "把背景换成雪山"
+}'
 
 # 图生视频
-print(generate({
-    "model": "wan2.2-i2v-spicy",
-    "image": "https://example.com/first-frame.png",
-    "prompt": "镜头缓缓推进",
-    "duration": 8,
-    "resolution": "720p",
-}, poll_interval=10))
+-d '{
+  "model": "wan2.2-i2v-spicy",
+  "image": "https://example.com/first-frame.png",
+  "prompt": "镜头缓缓推进",
+  "duration": 8,
+  "resolution": "720p"
+}'
 ```
 
 ## 注意事项
