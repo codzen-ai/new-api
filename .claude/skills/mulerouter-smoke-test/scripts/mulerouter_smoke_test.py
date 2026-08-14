@@ -21,61 +21,56 @@ import urllib.request
 
 QUOTA_PER_UNIT = 500_000.0
 TASK_ID_PREFIX = "task_"
-VENDOR_PREFIX = "/vendors/carrothub/v1"
+SUBMIT_PATH = "/v1/video/generations"
 
 # 上游基准单位价（美元），来自各端点文档页：图片按张，视频按秒 —— 与 billing_vars 的
 # 倍率基准一致（seconds 倍率取实际秒数，和 ali/gemini/sora/vertex 的约定相同）。
 # 实例配的 model_price 可以更高（加价是运营决策），preflight 只在低于成本价时警告。
 UPSTREAM_BASE_PRICE = {
-    "carrothub/qwen-image-edit-spicy/generation": 0.04,
-    "carrothub/z-image-spicy/generation": 0.013,
-    "carrothub/wan2.2-i2v-spicy/generation": 0.02,
+    "qwen-image-edit-spicy": 0.04,
+    "z-image-spicy": 0.013,
+    "wan2.2-i2v-spicy": 0.02,
 }
 
 # 每个用例声明它期望的倍率，这是断言的核心：倍率不对就是计费不对。
 CASES = {
     "z-image": {
-        "model": "carrothub/z-image-spicy/generation",
-        "endpoint": "z-image-spicy",
+        "model": "z-image-spicy",
         "body": {"prompt": "a calico cat sitting on a sunlit windowsill", "width": 1024, "height": 1024},
         "expect_ratios": {"prompt_extend": 1.076923},
-        "artifact_key": "images",
+        "artifact_ext": ".png",
         "produces_image": True,
         "needs_image": False,
     },
     "z-image-noextend": {
-        "model": "carrothub/z-image-spicy/generation",
-        "endpoint": "z-image-spicy",
+        "model": "z-image-spicy",
         "body": {"prompt": "a red bicycle leaning on a brick wall", "prompt_extend": False},
         "expect_ratios": {"prompt_extend": 1.0},
-        "artifact_key": "images",
+        "artifact_ext": ".png",
         "produces_image": True,
         "needs_image": False,
     },
     "qwen-edit": {
-        "model": "carrothub/qwen-image-edit-spicy/generation",
-        "endpoint": "qwen-image-edit-spicy",
+        "model": "qwen-image-edit-spicy",
         "body": {"prompt": "make the background a snowy mountain"},
         "expect_ratios": {},
-        "artifact_key": "images",
+        "artifact_ext": ".png",
         "produces_image": True,
         "needs_image": True,
     },
     "wan-480p": {
-        "model": "carrothub/wan2.2-i2v-spicy/generation",
-        "endpoint": "wan2.2-i2v-spicy",
+        "model": "wan2.2-i2v-spicy",
         "body": {"prompt": "the camera slowly pushes in", "duration": 5, "resolution": "480p"},
         "expect_ratios": {"seconds": 5.0, "resolution": 1.0},
-        "artifact_key": "videos",
+        "artifact_ext": ".mp4",
         "produces_image": False,
         "needs_image": True,
     },
     "wan-720p-8s": {
-        "model": "carrothub/wan2.2-i2v-spicy/generation",
-        "endpoint": "wan2.2-i2v-spicy",
+        "model": "wan2.2-i2v-spicy",
         "body": {"prompt": "the camera orbits around the subject", "duration": 8, "resolution": "720p"},
         "expect_ratios": {"seconds": 8.0, "resolution": 2.0},
-        "artifact_key": "videos",
+        "artifact_ext": ".mp4",
         "produces_image": False,
         "needs_image": True,
     },
@@ -236,52 +231,54 @@ def guard_checks(client):
         {
             "name": "undeclared_cost_param",
             "why": "未在 billing_vars 声明的成本字段（n）必须被拒，否则就是一个无界乘数入口",
-            "path": f"{VENDOR_PREFIX}/z-image-spicy/generation",
-            "body": {"prompt": "guard check", "n": 4},
+            "body": {"model": "z-image-spicy", "prompt": "guard check", "n": 4},
             "expect": (400,),
-            "must_contain": ["billing_vars"],
+            "must_contain": ["affect the price"],
         },
         {
             "name": "duration_outside_enum",
             "why": "duration 是计费乘数，枚举外的值必须 400 拒绝而不是静默 clamp",
-            "path": f"{VENDOR_PREFIX}/wan2.2-i2v-spicy/generation",
-            "body": {"prompt": "guard check", "image": "https://example.com/x.png", "duration": 9},
+            "body": {"model": "wan2.2-i2v-spicy", "prompt": "guard check",
+                     "image": "https://example.com/x.png", "duration": 9},
             "expect": (400,),
             "must_contain": ["duration"],
         },
         {
             "name": "duration_absurdly_large",
             "why": "包装过的负数（JSON 大整数）不能变成巨额乘数",
-            "path": f"{VENDOR_PREFIX}/wan2.2-i2v-spicy/generation",
-            "body": {"prompt": "guard check", "image": "https://example.com/x.png",
-                     "duration": 18446744073686646784},
+            "body": {"model": "wan2.2-i2v-spicy", "prompt": "guard check",
+                     "image": "https://example.com/x.png", "duration": 18446744073686646784},
             "expect": (400,),
             "must_contain": ["duration"],
         },
         {
             "name": "width_out_of_range",
             "why": "声明了边界的字段即使不计费也要守住上界",
-            "path": f"{VENDOR_PREFIX}/z-image-spicy/generation",
-            "body": {"prompt": "guard check", "width": 4096},
+            "body": {"model": "z-image-spicy", "prompt": "guard check", "width": 4096},
             "expect": (400,),
             "must_contain": ["width"],
         },
         {
             "name": "unlisted_model",
             "why": "路由表里没有的模型既没有价格也没有乘数约束，必须拒绝",
-            "path": f"{VENDOR_PREFIX}/not-a-real-model/generation",
-            "body": {"prompt": "guard check"},
             # 未登记的模型通常先死在渠道选择上（503「无可用渠道」，平台既有约定），
             # 只有当渠道的 models 列了这个名字、路由表却没有时，才会走到适配器的 404。
-            # 两条都是正确的拒绝路径，关键是拒绝理由指向这个模型而不是别的什么错误。
+            "body": {"model": "not-a-real-model", "prompt": "guard check"},
             "expect": (400, 404, 503),
             "must_contain": ["not-a-real-model", "无可用渠道", "not configured", "no available channel"],
         },
         {
+            "name": "vendor_path_hidden",
+            "why": "厂商原生路径不应对客户端开放 —— 渠道模型列表里只有短名时它必然无渠道可选",
+            "path": "/vendors/carrothub/v1/z-image-spicy/generation",
+            "body": {"prompt": "guard check"},
+            "expect": (404, 503),
+            "must_contain": ["无可用渠道", "no available channel", "not configured"],
+        },
+        {
             "name": "missing_token",
             "why": "未鉴权的请求不能进入中转链路",
-            "path": f"{VENDOR_PREFIX}/z-image-spicy/generation",
-            "body": {"prompt": "guard check"},
+            "body": {"model": "z-image-spicy", "prompt": "guard check"},
             "expect": (401,),
             "must_contain": ["token", "令牌", "unauthorized"],
             "token": None,
@@ -291,7 +288,7 @@ def guard_checks(client):
     results = []
     for guard in guards:
         token = guard.get("token", ...)
-        status, _, payload = client.relay("POST", guard["path"], guard["body"], token=token)
+        status, _, payload = client.relay("POST", guard.get("path", SUBMIT_PATH), guard["body"], token=token)
         message = extract_message(payload)
         lowered = message.lower()
         matched = next((needle for needle in guard["must_contain"] if needle.lower() in lowered), None)
@@ -327,15 +324,14 @@ def extract_message(payload):
 
 def run_case(client, name, image_url, poll_timeout, poll_interval):
     case = CASES[name]
-    path = f"{VENDOR_PREFIX}/{case['endpoint']}/generation"
-    body = dict(case["body"])
+    body = dict(case["body"], model=case["model"])
     if case["needs_image"]:
         if not image_url:
             return {"case": name, "error": "该用例需要输入图片，但没有可用的 image_url"}
         body["image"] = image_url
 
     submitted_at = int(time.time()) - 5
-    status, headers, payload = client.relay("POST", path, body)
+    status, headers, payload = client.relay("POST", SUBMIT_PATH, body)
     result = {
         "case": name,
         "model": case["model"],
@@ -344,14 +340,14 @@ def run_case(client, name, image_url, poll_timeout, poll_interval):
         "submit_body": payload,
         "submitted_at": submitted_at,
     }
-    if status != 202:
-        result["error"] = f"提交未返回 202：HTTP {status} {extract_message(payload)}"
+    if status != 200:
+        result["error"] = f"提交失败：HTTP {status} {extract_message(payload)}"
         return result
 
-    info = (payload.get("task_info") or {})
-    task_id = info.get("id") or ""
+    task_id = payload.get("id") or payload.get("task_id") or ""
     result["task_id"] = task_id
-    result["submit_status_field"] = info.get("status")
+    result["submit_status_field"] = payload.get("status")
+    result["submit_model"] = payload.get("model")
     # 提交响应头带回本次实际生效的倍率，比事后从日志文案里解析可靠得多。
     try:
         result["actual_ratios"] = json.loads(headers.get("X-New-Api-Other-Ratios") or "{}")
@@ -359,30 +355,26 @@ def run_case(client, name, image_url, poll_timeout, poll_interval):
         result["actual_ratios"] = {}
 
     if not task_id.startswith(TASK_ID_PREFIX):
-        result["error"] = f"返回的 task_info.id 不是本站任务 ID：{task_id}（上游 UUID 泄漏？）"
+        result["error"] = f"返回的任务 ID 不是本站 ID：{task_id}（上游 UUID 泄漏？）"
         return result
 
-    result.update(poll_task(client, path, task_id, poll_timeout, poll_interval))
+    result.update(poll_task(client, task_id, poll_timeout, poll_interval))
     return result
 
 
-def poll_task(client, path, task_id, timeout, interval):
+def poll_task(client, task_id, timeout, interval):
     deadline = time.time() + timeout
-    last = {}
     while True:
-        status, _, payload = client.relay("GET", f"{path}/{task_id}")
+        status, _, payload = client.relay("GET", f"{SUBMIT_PATH}/{task_id}")
+        data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
         last = {"poll_status": status, "final_body": payload}
-        info = (payload.get("task_info") or {}) if isinstance(payload, dict) else {}
-        state = info.get("status")
-        if state in ("completed", "failed"):
+        state = data.get("status")
+        if state in ("SUCCESS", "FAILURE"):
             last["final_state"] = state
-            for key in ("images", "videos", "audios"):
-                if payload.get(key):
-                    last["artifact_key"] = key
-                    last["artifacts"] = payload[key]
-                    break
-            if state == "failed":
-                last["fail_reason"] = extract_message(payload)
+            if data.get("result_url"):
+                last["artifacts"] = [data["result_url"]]
+            if state == "FAILURE":
+                last["fail_reason"] = data.get("fail_reason") or extract_message(payload)
             return last
         if time.time() >= deadline:
             last["final_state"] = state or "unknown"
@@ -413,10 +405,13 @@ def verify_case(result, case_name, group_ratio, model_price):
     def check(name, passed, detail):
         checks.append({"name": name, "passed": bool(passed), "detail": detail})
 
-    check("submit_accepted", result.get("submit_status") == 202,
-          f"HTTP {result.get('submit_status')}，task_info.status={result.get('submit_status_field')}")
+    check("submit_accepted", result.get("submit_status") == 200,
+          f"HTTP {result.get('submit_status')}，status={result.get('submit_status_field')}")
+    # 客户端不该在任何响应里看到内部三段式名字。
+    check("model_name_is_public", result.get("submit_model") == case["model"],
+          f"响应里的 model={result.get('submit_model')}，期望 {case['model']}")
     check("task_id_masked", str(result.get("task_id", "")).startswith(TASK_ID_PREFIX),
-          f"task_info.id={result.get('task_id')}（必须是本站 ID，不能泄漏上游 UUID）")
+          f"id={result.get('task_id')}（必须是本站 ID，不能泄漏上游 UUID）")
 
     actual_ratios = result.get("actual_ratios") or {}
     expected_ratios = case["expect_ratios"]
@@ -426,15 +421,15 @@ def verify_case(result, case_name, group_ratio, model_price):
           f"期望 {expected_ratios}，实际 {actual_ratios}")
 
     state = result.get("final_state")
-    check("task_completed", state == "completed",
+    check("task_completed", state == "SUCCESS",
           f"终态 {state}" + (f"：{result.get('fail_reason')}" if result.get("fail_reason") else ""))
 
-    if state == "completed":
-        check("artifact_key", result.get("artifact_key") == case["artifact_key"],
-              f"期望产物字段 {case['artifact_key']}，实际 {result.get('artifact_key')}")
+    if state == "SUCCESS":
         artifacts = result.get("artifacts") or []
-        check("artifact_url", bool(artifacts) and str(artifacts[0]).startswith("http"),
-              f"产物 {artifacts[:1]}")
+        first = str(artifacts[0]) if artifacts else ""
+        check("artifact_url", first.startswith("http"), f"产物 {artifacts[:1]}")
+        check("artifact_type", case["artifact_ext"] in first,
+              f"期望 {case['artifact_ext']} 产物，实际 {first[-40:]}")
 
     log = result.get("consume_log")
     if log is not None:
