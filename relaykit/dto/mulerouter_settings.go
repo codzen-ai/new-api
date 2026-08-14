@@ -164,9 +164,12 @@ func (r *MuleRouterRoute) EvaluateBilling(params map[string]any) (map[string]flo
 	}
 	if len(undeclared) > 0 {
 		sort.Strings(undeclared)
+		// Name the offending parameters but not the route: this message reaches
+		// the caller, who knows which model they asked for and has no business
+		// learning which upstream vendor serves it.
 		return nil, fmt.Errorf(
-			"parameter(s) %s affect upstream cost but are not declared in this channel's billing_vars for model %s; declare them (with bounds) before use",
-			strings.Join(undeclared, ", "), r.ModelName())
+			"parameter(s) %s affect the price of this model and are not enabled on this endpoint; remove them",
+			strings.Join(undeclared, ", "))
 	}
 
 	return ratios, nil

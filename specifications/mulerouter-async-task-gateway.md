@@ -68,9 +68,13 @@ GET  /vendors/carrothub/v1/wan2.2-i2v-spicy/generation/{task_id}
                         └─ https://api.mulerouter.ai/vendors/{vendor}/v1/{model}/{action}
 ```
 
-同时顺带获得 **统一任务路由**：视频类模型可直接从 `/v1/video/generations` 提交
-（`model` 传内部模型名），并通过 `ConvertToOpenAIVideo` 支持 `/v1/videos/:task_id`。
-图片 / 音频类模型只走原生路由。
+同时获得 **统一任务路由** `/v1/video/generations`（尽管名字带 video，它是通用异步任务入口，
+三类模型都能走），视频模型还额外支持 OpenAI 风格的 `/v1/videos/:task_id`。
+
+**这条路径才是面向终端用户的。** 配上渠道模型重定向（短名 → 三段式内部名）之后，
+客户端只看到 `z-image-spicy` 这样的短名，路径和参数里都不出现上游厂商；原生 `/vendors/...`
+路径因为渠道模型列表里没有三段式全名而自然不可达。终端用户文档见
+[guides/user/image-video-generation.md](../guides/user/image-video-generation.md)。
 
 ### 3.1 内部模型名
 
@@ -242,14 +246,19 @@ g.Use(middleware.MuleRouterRequestConvert(), middleware.TokenAuth(), middleware.
   再 `relaycommon.ValidateBasicTaskRequest`（含 prompt 非空与 `MaxTaskDurationSeconds` 边界），
   最后 `EvaluateBilling`。**校验对象是合并 metadata 之后的最终上游 body**，
   metadata 天然无法绕过边界检查。
-- **路由按 `OriginModelName` 解析，不按 `UpstreamModelName`**：价格也是按 `OriginModelName`
-  索引的，两者用同一个身份才不会出现「按 A 计价、跑 B 模型」。因此 `BuildRequestURL`
-  在渠道模型映射改写了模型名时**直接报错**，而不是照映射后的名字去调用。
+- **路由按映射后的 `UpstreamModelName` 解析**：适配器自己先调一次 `ModelMappedHelper`，
+  这样管理员可以用渠道的「模型重定向」把三段式内部名藏起来，只给客户端暴露短名
+  （`z-image-spicy` → `carrothub/z-image-spicy/generation`）。模型重定向是管理员配置，
+  与「用户可控量必须限界」无关；限界靠的是下面的 `billing_vars`。
 - **`BuildRequestURL`**：`{baseURL}/vendors/{vendor}/v1/{model}/{action}`，
   取自路由表条目（已白名单化的值，不是用户原始输入）。
 - **`BuildRequestBody`**：合并后的 body 原样序列化。不定义强类型请求结构——各 vendor 字段
   差异太大，透传才是这套抽象的意义；`seed: 0` / `prompt_extend: false` 因为走的是
   `map[string]any` 而非带 `omitempty` 的结构体，天然不会被丢弃（有回归测试守着）。
+- **厂商字段顶层与 `metadata` 都接受**：`mergeUpstreamParams` 读的是**原始请求体**而不是
+  解析后的 `TaskSubmitReq`——后者只认 new-api 的统一词汇表，`width` / `resolution` /
+  `prompt_extend` 这些它没有的字段会在适配器看到之前就被丢掉，调用方会拿到一个用默认参数
+  生成的结果却毫无提示。同名时以 `metadata` 为准。
 - **`EstimateBilling`**：直接返回校验阶段算好的倍率表，不重新读原始 body——**倍率只能来自已校验值**。
 - **`DoResponse`**：取 `task_info.id` 作为上游任务 ID，响应体原样作为 `taskData` 落库；
   按 `mulerouter_native_route` 决定回 MuleRouter 形状还是 OpenAI video 形状。
@@ -483,10 +492,11 @@ MuleRouter 任务量一大会同时造成：(a) 占满 1000 的取数配额，�
 3. **不改写请求路径。** 初版打算把 `/vendors/...` 改写成 `/v1/video/generations` 来骗过
    `getModelRequest`。改成在 `getModelRequest` 里加一个 `/vendors/` 分支（与 `/suno/`、`/mj/` 同构），
    避免后续任何读取 `c.Request.URL.Path` 的代码看到一个假路径。
-4. **路由按 `OriginModelName` 解析，并拒绝跨路由的模型映射。** 初版说"按映射后的
-   `UpstreamModelName` 查路由"，但价格是按 `OriginModelName` 索引的——两者不一致就等于
-   "按 A 计价、跑 B 模型"。现在两者必须一致，否则直接报错。代价是客户端在统一路由上要写全名，
-   这个代价值得。
+4. **路由按映射后的名字解析（一度改错又改回）。** 中途曾按 `OriginModelName` 查路由并拒绝
+   一切模型映射，理由是"按 A 计价、跑 B 模型"。这个理由站不住：模型重定向是**管理员配置**，
+   计费安全不变量管的是用户可控输入；而且 new-api 每个渠道都是按客户端名字计价的，
+   MuleRouter 没道理特殊。放开之后管理员才能把三段式内部名藏起来只暴露短名——这既是易用性
+   需求，也是不让终端用户看到上游厂商的前提。
 5. **模型名不再塞进 `task.Properties`。** `InitTask` 本来就把 `UpstreamModelName` 写进了
    `Properties`；缺的只是轮询侧没把它传给 `FetchTask`。于是给轮询的 body map 加了一个 `model` 键
    （`service/task_polling.go`），这是本方案对共享代码的唯一改动，且对其他适配器无副作用。
