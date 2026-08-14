@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 
@@ -65,11 +66,14 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 		return service.TaskErrorWrapperLocal(errors.New("channel is missing its mulerouter route table"), "mulerouter_not_configured", http.StatusInternalServerError)
 	}
 
-	// The route is resolved from the client-facing model name — the same name
-	// the per-call price is indexed by. Resolving it from the mapped upstream
-	// name instead would let a channel model mapping bill model A's price while
-	// running model B.
-	route, ok := config.FindRouteByModelName(info.OriginModelName)
+	// Resolve the route against the mapped name so a channel model mapping can
+	// give callers a short, vendor-neutral model name. Mapping is administrator
+	// configuration, the same as it is on every other channel; the request-level
+	// billing bounds below are what protect against user-controlled input.
+	if err := helper.ModelMappedHelper(c, info, nil); err != nil {
+		return service.TaskErrorWrapperLocal(err, "model_mapping_failed", http.StatusBadRequest)
+	}
+	route, ok := config.FindRouteByModelName(info.UpstreamModelName)
 	if !ok {
 		return service.TaskErrorWrapperLocal(fmt.Errorf("model %s is not configured on this channel", info.OriginModelName), "model_not_found", http.StatusNotFound)
 	}
@@ -79,15 +83,16 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, info.Action); taskErr != nil {
 		return taskErr
 	}
-	req, err := relaycommon.GetTaskRequest(c)
-	if err != nil {
-		return service.TaskErrorWrapperLocal(err, "get_task_request_failed", http.StatusBadRequest)
-	}
 
+	params, err := mergeUpstreamParams(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
 	// Billing bounds are checked against the merged body that will actually be
-	// sent upstream, so metadata cannot smuggle a multiplier past them.
-	a.params = mergeUpstreamParams(req)
-	ratios, err := route.EvaluateBilling(a.params)
+	// sent upstream, so neither metadata nor a top-level field can smuggle a
+	// multiplier past them.
+	a.params = params
+	ratios, err := route.EvaluateBilling(params)
 	if err != nil {
 		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
 	}
@@ -95,28 +100,38 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	return nil
 }
 
-// mergeUpstreamParams builds the upstream body: the vendor-native fields the
-// caller sent (carried in metadata) plus the unified fields, with new-api's own
-// control fields removed.
-func mergeUpstreamParams(req relaycommon.TaskSubmitReq) map[string]any {
-	params := make(map[string]any, len(req.Metadata)+2)
-	for key, value := range req.Metadata {
+// mergeUpstreamParams builds the upstream body from the request as the caller
+// wrote it, minus new-api's own routing fields.
+//
+// Vendor fields are accepted both at the top level and under metadata, because
+// both spellings are in use: the vendor-compatible routes put the original body
+// under metadata, while callers on the unified task route naturally write the
+// vendor's own fields at the top level. Reading the raw body rather than the
+// parsed TaskSubmitReq is what makes the latter work at all — that struct only
+// carries new-api's unified vocabulary, so any field it does not name (width,
+// resolution, prompt_extend, ...) would otherwise be dropped before the adaptor
+// ever saw it, and the caller would silently get a default-parameter result.
+//
+// Metadata wins on conflict: it is the explicit, unambiguous channel.
+func mergeUpstreamParams(c *gin.Context) (map[string]any, error) {
+	var body map[string]any
+	if err := common.UnmarshalBodyReusable(c, &body); err != nil {
+		return nil, err
+	}
+
+	params := make(map[string]any, len(body))
+	for key, value := range body {
 		params[key] = value
+	}
+	if metadata, ok := body["metadata"].(map[string]any); ok {
+		for key, value := range metadata {
+			params[key] = value
+		}
 	}
 	for _, key := range controlKeys {
 		delete(params, key)
 	}
-	if _, ok := params["prompt"]; !ok && req.Prompt != "" {
-		params["prompt"] = req.Prompt
-	}
-	if _, ok := params["image"]; !ok {
-		if len(req.Images) > 0 {
-			params["image"] = req.Images[0]
-		} else if req.Image != "" {
-			params["image"] = req.Image
-		}
-	}
-	return params
+	return params, nil
 }
 
 func (a *TaskAdaptor) EstimateBilling(_ *gin.Context, _ *relaycommon.RelayInfo) map[string]float64 {
@@ -126,11 +141,6 @@ func (a *TaskAdaptor) EstimateBilling(_ *gin.Context, _ *relaycommon.RelayInfo) 
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if a.route == nil {
 		return "", errors.New("mulerouter route not resolved")
-	}
-	// A channel model mapping that redirects to a different route would run one
-	// model at another's price; refuse instead of mispricing.
-	if info.IsModelMapped && info.UpstreamModelName != info.OriginModelName {
-		return "", fmt.Errorf("mulerouter models cannot be remapped (%s -> %s)", info.OriginModelName, info.UpstreamModelName)
 	}
 	path, ok := dto.MuleRouterUpstreamPath(a.route.ModelName())
 	if !ok {
