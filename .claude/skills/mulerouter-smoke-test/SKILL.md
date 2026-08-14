@@ -1,6 +1,6 @@
 ---
 name: mulerouter-smoke-test
-description: Smoke-test a new-api instance's MuleRouter channel end to end — submit, poll, verify the response shape, the artifacts, the billing multipliers and the charged quota for the carrothub spicy models (z-image-spicy, qwen-image-edit-spicy, wan2.2-i2v-spicy). Use this whenever the user wants to test, verify, validate or debug a MuleRouter / carrothub / spicy channel on a running instance — including phrasings like "测一下 MuleRouter 渠道", "验证 carrothub 配置对不对", "跑一下冒烟测试", "调用本地接口测试刚创建的模型", "check the /vendors routes work", or when they have just created a MuleRouter channel and want to confirm it relays correctly. Also use it when a MuleRouter request fails, returns an unexpected status, or charges an amount that looks wrong, and you need evidence from a live run.
+description: Smoke-test a new-api instance's MuleRouter channel end to end — submit, poll, verify the response shape, the artifacts, the billing multipliers and the charged quota for the spicy image and video models (z-image-spicy, qwen-image-edit-spicy, wan2.2-i2v-spicy). Use this whenever the user wants to test, verify, validate or debug a MuleRouter / carrothub / spicy channel on a running instance — including phrasings like "测一下 MuleRouter 渠道", "验证 carrothub 配置对不对", "跑一下冒烟测试", "调用本地接口测试刚创建的模型", "check the image/video generation models work", or when they have just created a MuleRouter channel and want to confirm it relays correctly. Also use it when a MuleRouter request fails, returns an unexpected status, or charges an amount that looks wrong, and you need evidence from a live run.
 ---
 
 # MuleRouter 渠道联调
@@ -8,6 +8,7 @@ description: Smoke-test a new-api instance's MuleRouter channel end to end — s
 这个 skill 验证一个跑着的 new-api 实例的 MuleRouter 渠道是否真的能用。它回答三个问题，重要性递减：
 
 1. **护栏还在吗** —— 未声明的成本字段、越界的计费乘数、未登记的模型，是否都在扣费之前被拒；
+   厂商原生路径是否确实对客户端不可达；
 2. **链路通不通** —— 提交能不能拿到本站任务 ID，轮询能不能推到 `completed`，产物 URL 有没有；
 3. **钱扣得对不对** —— 实际扣费是否等于 `固定价 × 倍率 × 分组倍率`。
 
@@ -71,11 +72,12 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 | 断言 | 检查什么 | 失败意味着 |
 |---|---|---|
-| `submit_accepted` | 提交返回 202 且 `task_info.status == pending` | 路由、渠道选择或上游鉴权有问题 |
-| `task_id_masked` | 返回的 `task_info.id` 是 `task_` 开头的本站 ID | 上游 UUID 泄漏给了客户端 |
+| `submit_accepted` | 提交返回 200 | 路由、渠道选择或上游鉴权有问题 |
+| `model_name_is_public` | 响应里的 `model` 是客户端传的短名 | 内部三段式名字泄漏给了客户端 |
+| `task_id_masked` | 返回的 `id` 是 `task_` 开头的本站 ID | 上游 UUID 泄漏给了客户端 |
 | `billing_ratios` | 提交响应头 `X-New-Api-Other-Ratios` 等于该用例期望的倍率 | 计费变量没生效或配错了 |
-| `task_completed` | 轮询到 `completed` | 上游失败，或响应体形状和假设不符 |
-| `artifact_key` / `artifact_url` | 产物在期望的字段里且是可用 URL | 产物字段名和假设不符 |
+| `task_completed` | 轮询到 `SUCCESS` | 上游失败，或响应体形状和假设不符 |
+| `artifact_url` / `artifact_type` | `result_url` 是可用 URL 且扩展名符合模型的产物类型 | 产物解析和假设不符 |
 | `quota_charged` | 扣费 == `固定价 × 倍率 × 分组倍率 × QuotaPerUnit` | 计费链路和预期不符 |
 
 `quota_charged` 的复算刻意分两步取整（先把按次价折成基础额度，再乘倍率），因为 `relay_task.go` 就是这么算的，合成一次乘法会差 1 个额度。断言留了 ±1 容差吸收浮点误差 —— 数量级错误照样会被抓到。
@@ -98,7 +100,9 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 **提交 400 `model_price_error` / 「模型倍率未配置」** —— 模型没配固定价格。预检本该拦住，说明跑的时候跳过了预检。
 
-**提交 404 `model_not_found`** —— 模型名不在渠道的路由表里。注意内部模型名是 `{vendor}/{model}/{action}` 三段式，漏掉 `/generation` 是最常见的写法错误。
+**提交 503「无可用渠道」** —— 渠道的模型列表里没有这个名字。客户端用的是短名（`z-image-spicy`），渠道需要同时配好模型列表和「模型重定向」把短名映射到三段式内部名 `{vendor}/{model}/{action}`。
+
+**提交 404 `model_not_found`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在路由表里。检查两者是否对齐。
 
 **提交 400 且报某个字段"影响成本但未声明"** —— 请求里带了成本字段黑名单里的键（`n`/`duration`/`resolution`/`size`/`width`/`height` 等）而路由的 `billing_vars` 没声明它。这是设计行为不是 bug：给它加一条带上界的声明，或者别传这个字段。
 
