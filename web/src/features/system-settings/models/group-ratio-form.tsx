@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Code2, Eye, HelpCircle } from 'lucide-react'
+import { AlertTriangle, Code2, Eye, HelpCircle } from 'lucide-react'
 import { memo, useCallback, useMemo, useState, type ReactNode } from 'react'
 import type { UseFormReturn } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -33,6 +33,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from '@/components/ui/accordion'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -80,16 +81,50 @@ type GroupRatioFormProps = {
   form: UseFormReturn<GroupFormValues>
   onSave: (values: GroupFormValues) => Promise<void>
   isSaving: boolean
+  /** 已保存的 ModelPrice / BillingMode，用于提示哪些模型的分组倍率覆盖不会生效 */
+  modelPrice: string
+  billingMode: string
 }
 
 export const GroupRatioForm = memo(function GroupRatioForm({
   form,
   onSave,
   isSaving,
+  modelPrice,
+  billingMode,
 }: GroupRatioFormProps) {
   const { t } = useTranslation()
   const [editMode, setEditMode] = useState<'visual' | 'json'>('visual')
   const [guideOpen, setGuideOpen] = useState(false)
+
+  // 分组模型倍率只作用于「按量倍率」计费的模型。给固定价或表达式计费的模型配覆盖
+  // 会静默失效（保存成功但计费不变），这里在保存前就把这些模型标出来。
+  const groupModelRatioValue = form.watch('GroupModelRatio')
+  const ineffectiveOverrideModels = useMemo(() => {
+    const overrides = safeJsonParse<Record<string, Record<string, number>>>(
+      groupModelRatioValue,
+      { fallback: {}, silent: true }
+    )
+    const prices = safeJsonParse<Record<string, number>>(modelPrice, {
+      fallback: {},
+      silent: true,
+    })
+    const modes = safeJsonParse<Record<string, string>>(billingMode, {
+      fallback: {},
+      silent: true,
+    })
+
+    const names = new Set<string>()
+    for (const models of Object.values(overrides)) {
+      if (!models || typeof models !== 'object') continue
+      for (const name of Object.keys(models)) {
+        if (Object.hasOwn(prices, name) || modes[name] === 'tiered_expr') {
+          names.add(name)
+        }
+      }
+    }
+    return [...names].sort()
+  }, [groupModelRatioValue, modelPrice, billingMode])
 
   const handleFieldChange = useCallback(
     (field: keyof GroupFormValues, value: string) => {
@@ -366,6 +401,17 @@ export const GroupRatioForm = memo(function GroupRatioForm({
                       'sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models.'
                     )}
                   </FormDescription>
+                  {ineffectiveOverrideModels.length > 0 && (
+                    <Alert>
+                      <AlertTriangle className='h-4 w-4' />
+                      <AlertDescription>
+                        {t(
+                          'These models are billed by fixed price or expression, so the ratio set here will not take effect: {{models}}',
+                          { models: ineffectiveOverrideModels.join(', ') }
+                        )}
+                      </AlertDescription>
+                    </Alert>
+                  )}
                   <FormMessage />
                 </FormItem>
               )}
