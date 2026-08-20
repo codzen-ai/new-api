@@ -270,12 +270,21 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (hostt
 	return priceData, nil
 }
 
-func HasModelBillingConfig(modelName string) bool {
+// HasModelBillingConfig 判断模型是否已配置计费方式。
+// groups 是判断视角下的可用分组集合：分组模型倍率覆盖单独存在（模型没有配置全局倍率）时
+// 该模型对这些分组也是可计费的，判定必须与 ModelPriceHelper 一致，
+// 否则会出现「能按覆盖价计费、却被排除在模型列表之外」。
+func HasModelBillingConfig(modelName string, groups []string) bool {
 	if _, ok := ratio_setting.GetModelPrice(modelName, false); ok {
 		return true
 	}
 	if _, ok, _ := ratio_setting.GetModelRatio(modelName); ok {
 		return true
+	}
+	for _, group := range groups {
+		if _, ok := ratio_setting.GetGroupModelRatio(group, modelName); ok {
+			return true
+		}
 	}
 	if billing_setting.GetBillingMode(modelName) != billing_setting.BillingModeTieredExpr {
 		return false
