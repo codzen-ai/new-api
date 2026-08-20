@@ -39,6 +39,7 @@ const defaults = {
   TopupGroupRatio: '{"vip":1.2}',
   UserUsableGroups: '{"default":"Standard access","vip":"Premium access"}',
   GroupGroupRatio: '{}',
+  GroupModelRatio: '{}',
   AutoGroups: '["default","vip"]',
   MaxTokenAutoGroups: 5,
   DefaultUseAutoGroup: false,
@@ -50,6 +51,7 @@ const schema = z.object({
   TopupGroupRatio: z.string(),
   UserUsableGroups: z.string(),
   GroupGroupRatio: z.string(),
+  GroupModelRatio: z.string(),
   AutoGroups: z.string(),
   MaxTokenAutoGroups: positiveIntegerSchema('Enter a positive integer'),
   DefaultUseAutoGroup: z.boolean(),
@@ -73,6 +75,8 @@ function Fixture(props: {
         form={form}
         onSave={props.onSave ?? (async () => {})}
         isSaving={props.isSaving ?? false}
+        modelPrice='{}'
+        billingMode='{}'
       />
     </SettingsPageProvider>
   )
