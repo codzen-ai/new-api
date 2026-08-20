@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/glebarez/sqlite"
 	"github.com/shopspring/decimal"
@@ -1267,4 +1268,129 @@ func TestSettle_NonPerCallBilling_AppliesAdaptorAdjustment(t *testing.T) {
 	log := getLastLog(t)
 	require.NotNil(t, log)
 	assert.Equal(t, model.LogTypeRefund, log.Type)
+}
+
+// setTaskRatioSettings 在测试内显式设置计费倍率状态，并在用例结束后恢复。
+func setTaskRatioSettings(t *testing.T, modelRatio, groupRatio, groupModelRatio string) {
+	t.Helper()
+	origModel := ratio_setting.ModelRatio2JSONString()
+	origGroup := ratio_setting.GroupRatio2JSONString()
+	origGroupModel := ratio_setting.GroupModelRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(origModel))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(origGroup))
+		require.NoError(t, ratio_setting.UpdateGroupModelRatioByJSONString(origGroupModel))
+	})
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(modelRatio))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(groupRatio))
+	require.NoError(t, ratio_setting.UpdateGroupModelRatioByJSONString(groupModelRatio))
+}
+
+// makeRatioBilledTask 构造一个按量倍率计费的任务（BillingContext 不带 OtherRatios，倍率乘积为 1）。
+func makeRatioBilledTask(userID, channelID, tokenID, preConsumed int, group, modelName string) *model.Task {
+	task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
+	task.Group = group
+	task.Properties.OriginModelName = modelName
+	task.PrivateData.BillingContext.OriginModelName = modelName
+	return task
+}
+
+// TestRecalculateByTokens_AppliesGroupModelRatioOverride 保证异步任务的差额结算与预扣费
+// （ModelPriceHelperPerCall）应用同一套分组模型倍率语义。若结算侧漏掉覆盖，
+// 预扣时生效的覆盖倍率会被按全局 model_ratio × group_ratio 的重算结果抹掉。
+func TestRecalculateByTokens_AppliesGroupModelRatioOverride(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, tokenID, channelID = 40, 40, 40
+	// 预扣额度刻意取成「漏掉覆盖时的重算结果」5000：覆盖生效则退还 3000，
+	// 覆盖被抹掉则 delta 为 0、额度原样保留，两种结果可区分。
+	const initQuota, preConsumed, tokenRemain = 100000, 5000, 50000
+	const totalTokens = 1000
+
+	// 覆盖倍率 2 → 1000 × 2 × 1.0 = 2000；
+	// 若漏掉覆盖则会按 1000 × 10 × 0.5 = 5000 结算。
+	setTaskRatioSettings(t,
+		`{"gmr-task-model":10}`,
+		`{"gmr-task-group":0.5}`,
+		`{"gmr-task-group":{"gmr-task-model":2}}`,
+	)
+
+	seedUser(t, userID, initQuota)
+	seedToken(t, tokenID, userID, "sk-gmr-task", tokenRemain)
+	seedChannel(t, channelID)
+	seedChargedAccounting(t, userID, channelID, tokenID, preConsumed, 1)
+
+	task := makeRatioBilledTask(userID, channelID, tokenID, preConsumed, "gmr-task-group", "gmr-task-model")
+
+	RecalculateTaskQuotaByTokens(ctx, task, totalTokens)
+
+	assert.Equal(t, 2000, task.Quota)
+	assert.Equal(t, initQuota+(preConsumed-2000), getUserQuota(t, userID))
+}
+
+// TestRecalculateByTokens_OverrideAloneEnablesTokenRecompute 覆盖单独存在（模型没有配置全局倍率）
+// 时，预扣费已把该模型当作按量计费；结算必须同样按 token 重算，否则用户会停留在预扣估算值上。
+func TestRecalculateByTokens_OverrideAloneEnablesTokenRecompute(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, tokenID, channelID = 41, 41, 41
+	const initQuota, preConsumed, tokenRemain = 100000, 2000, 50000
+	const totalTokens = 1000
+
+	// 全局倍率表里没有该模型，只有分组覆盖 3 → 1000 × 3 × 1.0 = 3000。
+	setTaskRatioSettings(t,
+		`{}`,
+		`{"gmr-task-group":0.5}`,
+		`{"gmr-task-group":{"gmr-only-model":3}}`,
+	)
+
+	seedUser(t, userID, initQuota)
+	seedToken(t, tokenID, userID, "sk-gmr-only", tokenRemain)
+	seedChannel(t, channelID)
+	seedChargedAccounting(t, userID, channelID, tokenID, preConsumed, 1)
+
+	task := makeRatioBilledTask(userID, channelID, tokenID, preConsumed, "gmr-task-group", "gmr-only-model")
+
+	RecalculateTaskQuotaByTokens(ctx, task, totalTokens)
+
+	assert.Equal(t, 3000, task.Quota)
+	assert.Equal(t, initQuota-(3000-preConsumed), getUserQuota(t, userID))
+}
+
+// TestRecalculateByTokens_FixedPriceModelIgnoresOverride 固定价格计费的模型在预扣费时不适用
+// 分组模型倍率；结算必须保持同样的优先级，不能因为存在覆盖就切换成按 token 重算。
+func TestRecalculateByTokens_FixedPriceModelIgnoresOverride(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, tokenID, channelID = 42, 42, 42
+	const initQuota, preConsumed, tokenRemain = 100000, 2000, 50000
+	const totalTokens = 1000
+
+	setTaskRatioSettings(t,
+		`{}`,
+		`{"gmr-task-group":0.5}`,
+		`{"gmr-task-group":{"gmr-fixed-model":3}}`,
+	)
+
+	origPrice := ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(origPrice))
+	})
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"gmr-fixed-model":0.05}`))
+
+	seedUser(t, userID, initQuota)
+	seedToken(t, tokenID, userID, "sk-gmr-fixed", tokenRemain)
+	seedChannel(t, channelID)
+	seedChargedAccounting(t, userID, channelID, tokenID, preConsumed, 1)
+
+	task := makeRatioBilledTask(userID, channelID, tokenID, preConsumed, "gmr-task-group", "gmr-fixed-model")
+
+	RecalculateTaskQuotaByTokens(ctx, task, totalTokens)
+
+	// 未发生 token 重算：预扣额度原样保留。
+	assert.Equal(t, preConsumed, task.Quota)
+	assert.Equal(t, initQuota, getUserQuota(t, userID))
 }
