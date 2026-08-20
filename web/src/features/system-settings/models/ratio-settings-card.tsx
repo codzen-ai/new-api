@@ -520,6 +520,8 @@ export function RatioSettingsCard({
           form={groupForm}
           onSave={saveGroupRatios}
           isSaving={updateOption.isPending}
+          modelPrice={modelDefaults.ModelPrice}
+          billingMode={modelDefaults.BillingMode}
         />
       )
     }
