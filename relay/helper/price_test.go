@@ -804,3 +804,40 @@ func (s *priceTestReservation) Refund(*gin.Context)      {}
 func (s *priceTestReservation) NeedsRefund() bool        { return false }
 func (s *priceTestReservation) GetPreConsumedQuota() int { return s.held }
 func (s *priceTestReservation) Reserve(quota int) error  { s.held = max(s.held, quota); return nil }
+
+// TestHasModelBillingConfigRecognizesGroupModelRatio 保证「只配了分组模型倍率覆盖、
+// 没有全局倍率」的模型被认定为已配置计费。ModelPriceHelper 会按覆盖价正常计费，
+// 若此处判定为未配置，模型会被 ListModels 排除，出现「能计费却不可见」。
+func TestHasModelBillingConfigRecognizesGroupModelRatio(t *testing.T) {
+	origModelRatio := ratio_setting.ModelRatio2JSONString()
+	origModelPrice := ratio_setting.ModelPrice2JSONString()
+	origGroupModelRatio := ratio_setting.GroupModelRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(origModelRatio))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(origModelPrice))
+		require.NoError(t, ratio_setting.UpdateGroupModelRatioByJSONString(origGroupModelRatio))
+	})
+
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"hmbc-global-model":10}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
+	require.NoError(t, ratio_setting.UpdateGroupModelRatioByJSONString(`{"hmbc-vip":{"hmbc-override-only":5}}`))
+
+	cases := []struct {
+		name   string
+		model  string
+		groups []string
+		want   bool
+	}{
+		{"覆盖单独存在且分组匹配", "hmbc-override-only", []string{"hmbc-vip"}, true},
+		{"覆盖存在但分组不匹配", "hmbc-override-only", []string{"hmbc-default"}, false},
+		{"未传分组时不认覆盖", "hmbc-override-only", nil, false},
+		{"多分组中任一命中即可", "hmbc-override-only", []string{"hmbc-default", "hmbc-vip"}, true},
+		{"全局倍率与分组无关", "hmbc-global-model", nil, true},
+		{"既无全局倍率也无覆盖", "hmbc-unconfigured", []string{"hmbc-vip"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, HasModelBillingConfig(tc.model, tc.groups))
+		})
+	}
+}
