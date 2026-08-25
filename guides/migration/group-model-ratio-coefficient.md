@@ -68,9 +68,17 @@ jq -n --slurpfile gmr gmr-before.json --slurpfile mr model-ratio.json '
   })'
 ```
 
-注意这个预演**不识别固定价模型**。凡是在「模型固定价格」（选项 `ModelPrice`）里出现的模型，
-无论能不能换算，都会被丢弃（旧版本里这类配置本来就不生效）。需要的话把 `ModelPrice`
-也导出来对照一下。
+注意这个预演**不识别固定价模型，也不识别表达式计费模型**。凡是出现在「模型固定价格」
+（选项 `ModelPrice`）里、或计费方式为 `tiered_expr`（选项 `billing_setting.billing_mode`）的模型，
+无论能不能换算，都会被丢弃（旧版本里这两类配置本来就不生效）。把这两个选项也导出来对照一下：
+
+```sql
+SELECT value FROM options WHERE "key" = 'ModelPrice';
+SELECT value FROM options WHERE "key" = 'billing_setting.billing_mode';
+```
+
+表达式计费的模型尤其容易误判：它们通常在 `ModelRatio` 里没有条目，预演会把它们标成
+「会被丢弃（没有全局模型倍率）」——结论对，理由不对，别据此去给它们补全局模型倍率。
 
 ### 2. 多节点：先停从节点
 
@@ -95,8 +103,8 @@ grep "分组模型倍率已迁移为系数语义" <日志>
 # 2) 被丢弃：没有全局模型倍率
 grep "没有对应的全局模型倍率" <日志>
 
-# 3) 被丢弃：配在固定价模型上
-grep "配在固定价模型上" <日志>
+# 3) 被丢弃：配在固定价或表达式计费模型上
+grep "配在固定价或表达式计费模型上" <日志>
 
 # 4) 迁移失败并退出（出现即中止流程，见下节）
 grep "migration left an unsafe state" <日志>
@@ -140,7 +148,7 @@ SELECT value FROM options WHERE "key" = 'GroupModelRatio';
 按步骤 4 记下的清单处理：
 
 - **没有全局模型倍率的**：先在「模型倍率」里给该模型配好全局价，再按系数重配分组差异。
-- **配在固定价模型上的**：这类配置在旧版本从未生效。新版本固定价也吃系数，
+- **配在固定价或表达式计费模型上的**：这类配置在旧版本从未生效。新版本这两类模型也吃系数，
   如果确实想给这些分组打折，现在按系数（比如八折填 `0.8`）配上即可。
 
 改配置立即生效，不需要重启。
@@ -156,7 +164,7 @@ SELECT value FROM options WHERE "key" = 'GroupModelRatio';
 | `[FATAL] ... migration left an unsafe state` 且进程退出 | 有存量配置，但换算或标记没写成功 | 修数据库连接/权限/磁盘，然后重启。**不要**手工改 `GroupModelRatio`，重启会重新换算 |
 | 启动正常，但没有「已迁移为系数语义」这一行 | 要么本来就没有存量配置（正常），要么标记早已存在（已迁移过） | 查 `GroupModelRatioSemantics`：是 `coefficient` 说明已迁移过，无需处理 |
 | 有 `[SYS] ... failed to migrate group model ratio semantics`，但进程没退出 | 存量配置为空时的失败，无计费风险 | 记录即可；下次启动会重试 |
-| 换算结果与预演不一致 | 可能涉及模型名归一（如思考预算变体），也可能预演漏算了固定价模型 | **暂停，交给人确认**，不要继续起从节点 |
+| 换算结果与预演不一致 | 可能涉及模型名归一（如思考预算变体），也可能预演漏算了固定价 / 表达式计费模型 | **暂停，交给人确认**，不要继续起从节点 |
 | 定价页/账单价格与升级前不一致 | 不符合本次迁移的核心不变量 | **立即暂停并上报**，按下节回滚 |
 
 ## 回滚
@@ -176,7 +184,8 @@ DELETE FROM options WHERE "key" = 'GroupModelRatioSemantics';
 按顺序执行，任一「中止」条件命中就停下来把情况交给人：
 
 1. 读 `GroupModelRatio`。为空 → 报告「无需迁移」，升级后只需确认进程正常启动，结束。
-2. 备份 `GroupModelRatio` 与 `ModelRatio` 到文件，报告文件路径。
+2. 备份 `GroupModelRatio`、`ModelRatio`、`ModelPrice` 与 `billing_setting.billing_mode`
+   到文件，报告文件路径（后两个用于判断哪些条目会被丢弃）。
 3. 生成预演结果并报告（哪些会换算成什么、哪些会被丢弃）。
 4. 若存在从节点：先停从节点，报告已停实例。
 5. 升级并启动主节点。
@@ -191,3 +200,34 @@ DELETE FROM options WHERE "key" = 'GroupModelRatioSemantics';
 
 **不要做的事**：不要在主节点迁移完成前启动从节点；不要手工改 `GroupModelRatio` 来"帮助"
 迁移（会被判成已是新语义）；不要在没有备份的情况下升级；不要在验证未通过时继续推进。
+
+## 迁移代码什么时候可以删掉
+
+换算器是一次性的：所有实例都迁移完之后，`model/group_model_ratio_migration.go`、它的测试
+和 `main.go` 里的调用就没有用了。但**不要裸删**——删掉之后，一个还没迁移过的库连上新二进制
+时，库里的绝对值会被直接当成系数解释，静默按错误的价格计费，正是本次迁移用 `[FATAL]`
+挡住的那个场景。
+
+正确做法是把换算器换成一道永久的启动守卫：
+
+```
+若 GroupModelRatio 非空 且 GroupModelRatioSemantics != "coefficient"
+    → FatalLog：检测到旧语义的分组模型倍率，请先升级到 vX.Y 完成自动迁移
+```
+
+这样换算逻辑、对 `ModelRatio` / `ModelPrice` / `billing_setting.billing_mode` 的依赖、
+以及那批迁移测试都可以删掉，而「旧库 + 新代码」仍然是启动失败而不是错误计费。
+
+删除时机取决于升级路径的开放程度：
+
+- **只服务自己的实例**：所有实例迁移完并验证通过后，下一个版本即可删。
+- **有其他人部署**：至少跨过一个「最低升级版本」窗口，并在 release note 里写明
+  「从 < vX.Y 升级必须先经停 vX.Y」——守卫里的报错信息就是这句话的执行版本。
+
+删除后要同步改的东西：
+
+- 标记行 `GroupModelRatioSemantics` 从此是永久数据，本文「回滚」一节里删除标记的那条 SQL
+  只在换算器还在时有意义，需要改写。
+- 本文开头加一句「换算器已于 vX.Y 移除，从更早版本升级需先经停 vX.Y」，正文保留——
+  它记录的是一次版本切换，仍然是排查历史价格差异的依据。
+- [guides/admin/group-model-ratio.md](../admin/group-model-ratio.md) 的「从旧版本升级」一节同理。

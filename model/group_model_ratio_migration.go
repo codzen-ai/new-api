@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"gorm.io/gorm"
 )
@@ -36,8 +37,9 @@ var ErrGroupModelRatioMigrationUnsafe = errors.New("group model ratio semantics 
 // 无法换算的条目会被丢弃并记入系统日志：
 //   - 模型没有配置全局倍率、或全局倍率为 0：新语义无法表达原来的价格，
 //     保留原值会按错误的价格计费（原值会被当成系数）。
-//   - 模型按固定价计费：旧语义下这类条目本来就不生效（静默失效），
-//     而新语义对固定价模型同样生效，保留会让这些分组在升级后突然变价。
+//   - 模型按固定价或表达式计费：旧语义下这类条目本来就不生效（旧的 ModelPriceHelper
+//     在读取覆盖值之前就已经沿固定价/表达式分支返回），而新语义对这两类模型同样生效，
+//     保留会让这些分组在升级后突然变价。
 //
 // 必须在选项加载进内存之后调用（依赖 ratio_setting.GetModelRatio 的模型名归一与实际配置），
 // 且只在主节点执行；通过 GroupModelRatioSemantics 选项标记，重复调用是安全的。
@@ -67,7 +69,7 @@ func MigrateGroupModelRatioToCoefficient() error {
 		return nil
 	}
 
-	migrated, unpriced, fixedPriced := migrateGroupModelRatioTable(existing)
+	migrated, unpriced, ineffective := migrateGroupModelRatioTable(existing)
 
 	if len(unpriced) > 0 {
 		sort.Strings(unpriced)
@@ -76,12 +78,12 @@ func MigrateGroupModelRatioToCoefficient() error {
 			strings.Join(unpriced, ", "),
 		))
 	}
-	if len(fixedPriced) > 0 {
-		sort.Strings(fixedPriced)
+	if len(ineffective) > 0 {
+		sort.Strings(ineffective)
 		common.SysError(fmt.Sprintf(
-			"分组模型倍率迁移：以下条目配在固定价模型上，旧版本中本来就不生效，已被移除；"+
-				"新版本对固定价模型生效，如需折扣请按系数重新配置（格式 分组/模型=原倍率）：%s",
-			strings.Join(fixedPriced, ", "),
+			"分组模型倍率迁移：以下条目配在固定价或表达式计费模型上，旧版本中本来就不生效，已被移除；"+
+				"新版本对这两类模型同样生效，如需折扣请按系数重新配置（格式 分组/模型=原倍率）：%s",
+			strings.Join(ineffective, ", "),
 		))
 	}
 
@@ -98,15 +100,15 @@ func MigrateGroupModelRatioToCoefficient() error {
 
 	common.SysLog(fmt.Sprintf(
 		"分组模型倍率已迁移为系数语义：%d 个分组，%d 个条目被移除",
-		len(migrated), len(unpriced)+len(fixedPriced),
+		len(migrated), len(unpriced)+len(ineffective),
 	))
 	return nil
 }
 
 // migrateGroupModelRatioTable 换算整张表，返回新表以及两类被丢弃条目的
-// "分组/模型=原值" 描述：没有全局倍率的、以及配在固定价模型上的。
+// "分组/模型=原值" 描述：没有全局倍率的、以及旧语义下本就不生效的。
 func migrateGroupModelRatioTable(table map[string]map[string]float64) (
-	migrated map[string]map[string]float64, unpriced []string, fixedPriced []string,
+	migrated map[string]map[string]float64, unpriced []string, ineffective []string,
 ) {
 	migrated = make(map[string]map[string]float64, len(table))
 
@@ -114,8 +116,12 @@ func migrateGroupModelRatioTable(table map[string]map[string]float64) (
 		converted := make(map[string]float64, len(models))
 		for modelName, oldRatio := range models {
 			entry := fmt.Sprintf("%s/%s=%g", group, modelName, oldRatio)
-			if isFixedPricedModel(modelName) {
-				fixedPriced = append(fixedPriced, entry)
+			// 判定顺序与 ModelPriceHelper 一致：表达式计费优先于固定价。旧代码在这两条
+			// 分支上都会在读取覆盖值之前返回，所以这些条目从未生效过，原样换算会让它们
+			// 在新语义下突然生效并改价——丢弃才能保持价格不变。
+			if billing_setting.GetBillingMode(modelName) == billing_setting.BillingModeTieredExpr ||
+				isFixedPricedModel(modelName) {
+				ineffective = append(ineffective, entry)
 				continue
 			}
 			// 免费保持免费：0 在两种语义下都表示不收费。
@@ -140,7 +146,7 @@ func migrateGroupModelRatioTable(table map[string]map[string]float64) (
 		}
 	}
 
-	return migrated, unpriced, fixedPriced
+	return migrated, unpriced, ineffective
 }
 
 // isFixedPricedModel 与 ModelPriceHelperPerCall 的固定价判定保持一致。
