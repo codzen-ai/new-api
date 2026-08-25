@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,6 +111,34 @@ func TestMigrateGroupModelRatioDropsFixedPricedEntries(t *testing.T) {
 		`{"gpt-4o":10,"both-model":10}`,
 		`{"draw-model":0.04,"both-model":0.04}`,
 		`{"vip":{"gpt-4o":5,"draw-model":3,"both-model":5}}`,
+	)
+
+	require.NoError(t, MigrateGroupModelRatioToCoefficient())
+
+	assert.JSONEq(t, `{"vip":{"gpt-4o":0.5}}`, requireOptionValue(t, db, "GroupModelRatio"))
+}
+
+// TestMigrateGroupModelRatioDropsTieredExprEntries 表达式计费模型上的旧条目同样是静默
+// 失效的：旧的 ModelPriceHelper 在读取覆盖值之前就沿表达式分支返回了。新版本对表达式
+// 模型生效，所以换算后保留会让这些分组在升级后突然变价——包括「表达式模型同时配了全局
+// 倍率」这种能算出系数、但除数根本不参与计价的情况。
+func TestMigrateGroupModelRatioDropsTieredExprEntries(t *testing.T) {
+	savedConfig := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedConfig[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedConfig))
+	})
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": `{"expr-model":"tiered_expr","expr-with-ratio":"tiered_expr"}`,
+		"billing_setting.billing_expr": `{"expr-model":"tier(\"base\", p * 3 + c * 15)","expr-with-ratio":"tier(\"base\", p * 3 + c * 15)"}`,
+	}))
+
+	db := useGroupModelRatioMigrationState(t,
+		`{"gpt-4o":10,"expr-with-ratio":10}`,
+		`{"vip":{"gpt-4o":5,"expr-model":8,"expr-with-ratio":5}}`,
 	)
 
 	require.NoError(t, MigrateGroupModelRatioToCoefficient())
