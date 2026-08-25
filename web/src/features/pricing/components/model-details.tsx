@@ -68,7 +68,11 @@ import {
   isDynamicPricingModel,
 } from '../lib/dynamic-price'
 import { parseTags } from '../lib/filters'
-import { getAvailableGroups, isTokenBasedModel } from '../lib/model-helpers'
+import {
+  getAvailableGroups,
+  getEffectiveGroupRatio,
+  isTokenBasedModel,
+} from '../lib/model-helpers'
 import { formatFixedPrice, formatGroupPrice } from '../lib/price'
 import type {
   ModelCapability,
@@ -1070,7 +1074,10 @@ function GroupPricingSection(props: {
             header: t('Ratio'),
             className: thClass,
             cellClassName: 'text-muted-foreground py-2.5 font-mono',
-            cell: (group) => `${props.groupRatio[group] || 1}x`,
+            // 展示实际生效的倍率：命中分组模型倍率时它取代分组倍率，
+            // 否则这一列会和同一行的价格算不上账。0 是合法值，不能被 || 1 吃掉。
+            cell: (group) =>
+              `${getEffectiveGroupRatio(props.model, group, props.groupRatio)}x`,
           },
           ...(isTokenBased
             ? [
