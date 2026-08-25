@@ -5333,7 +5333,6 @@
     "A billing var that contributes a multiplier must declare max or enum": "Une variable de facturation qui produit un multiplicateur doit déclarer max ou enum",
     "Nested JSON: group →": "Nested JSON: group →",
     "Per-group model ratio": "Per-group model ratio",
-    "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models.": "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models.",
-    "These models are billed by fixed price or expression, so the ratio set here will not take effect: {{models}}": "Ces modèles sont facturés à prix fixe ou par expression ; le ratio défini ici ne prendra pas effet : {{models}}"
+    "is that model's group ratio in that group: it replaces the group ratio and any inter-group override, while the model keeps its own pricing (global model ratio, fixed price, or billing expression).": "est le ratio de groupe de ce modèle dans ce groupe : il remplace le ratio de groupe et tout ratio inter-groupes, tandis que le modèle conserve sa propre tarification (ratio de modèle global, prix fixe ou expression de facturation)."
   }
 }

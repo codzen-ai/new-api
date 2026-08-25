@@ -324,6 +324,18 @@ func InitResources() error {
 	}
 	model.InitOptionMap()
 
+	// 分组模型倍率的语义迁移依赖已加载的模型倍率配置，必须在 InitOptionMap 之后
+	if common.IsMasterNode {
+		if err := model.MigrateGroupModelRatioToCoefficient(); err != nil {
+			if errors.Is(err, model.ErrGroupModelRatioMigrationUnsafe) {
+				// 存量配置仍是旧语义（或标记未落库），继续服务会按错误的价格计费
+				common.FatalLog("failed to migrate group model ratio semantics: " + err.Error())
+				return err
+			}
+			common.SysError("failed to migrate group model ratio semantics: " + err.Error())
+		}
+	}
+
 	// 清理旧的磁盘缓存文件
 	common.CleanupOldCacheFiles()
 

@@ -28,7 +28,10 @@ import {
   type BillingVar,
   type ParsedTier,
 } from './billing-expr'
-import { getDisplayGroupRatio } from './model-helpers'
+import {
+  getDisplayEffectiveGroupRatio,
+  getEffectiveGroupRatio,
+} from './model-helpers'
 
 type DynamicPriceOptions = {
   tokenUnit: TokenUnit
@@ -66,11 +69,28 @@ export function isDynamicPricingModel(model: PricingModel): boolean {
   return model.billing_mode === 'tiered_expr' && Boolean(model.billing_expr)
 }
 
+/**
+ * Multiplier applied to a dynamic model's expression output for one group:
+ * the per-group model ratio when configured, otherwise the group ratio.
+ */
+export function getDynamicGroupRatio(
+  model: PricingModel,
+  group: string,
+  groupRatio: Record<string, number>
+): number {
+  return getEffectiveGroupRatio(model, group, groupRatio)
+}
+
+/**
+ * Resolve the multiplier used by model square summary prices of dynamic models.
+ * Same rule as token-ratio models, so per-group model ratios behave identically
+ * across both billing modes.
+ */
 export function getDynamicDisplayGroupRatio(
   model: PricingModel,
   selectedGroup?: string
 ): number {
-  return getDisplayGroupRatio(model, selectedGroup)
+  return getDisplayEffectiveGroupRatio(model, selectedGroup)
 }
 
 function applyRechargeRate(
