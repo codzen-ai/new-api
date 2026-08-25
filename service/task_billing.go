@@ -333,21 +333,9 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 	// 获取模型价格和倍率
 	modelRatio, hasRatioSetting, _ := ratio_setting.GetModelRatio(modelName)
 
-	// 分组模型倍率（覆盖即最终价）：命中则覆盖值为最终模型倍率，分组倍率归一为 1.0，
-	// 且该模型即按量计费（即使没有配置全局倍率）。
-	// 判定顺序必须与预扣费的 ModelPriceHelperPerCall 一致：固定价格优先，覆盖不适用于按次计费的模型；
-	// 否则预扣按固定价、结算按 token 重算，差额结算会把覆盖倍率抹掉。
-	_, fixedPriced := ratio_setting.GetModelPrice(modelName, false)
-	if !fixedPriced {
-		_, fixedPriced = ratio_setting.GetDefaultModelPriceMap()[modelName]
-	}
-	if !fixedPriced {
-		if newModelRatio, newGroupRatio, overridden := ratio_setting.ResolveGroupModelPrice(group, modelName, modelRatio, finalGroupRatio); overridden {
-			modelRatio = newModelRatio
-			finalGroupRatio = newGroupRatio
-			hasRatioSetting = true
-		}
-	}
+	// 分组模型倍率：命中则该值取代分组倍率，与计费方式无关，与预扣费的
+	// ModelPriceHelperPerCall 保持一致；漏掉它，差额结算会把预扣时生效的倍率抹掉。
+	finalGroupRatio, _ = ratio_setting.ResolveGroupModelGroupRatio(group, modelName, finalGroupRatio)
 
 	// 只有配置了倍率(非固定价格)时才按 token 重新计费
 	if !hasRatioSetting || modelRatio <= 0 {

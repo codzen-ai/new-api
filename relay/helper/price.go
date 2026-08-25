@@ -70,10 +70,36 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) hostty
 	return groupRatioInfo
 }
 
+// applyGroupModelRatio 把分组模型倍率写回定价上下文：命中时该倍率就是这个模型在这个分组的
+// 分组倍率，取代 GroupRatio 与分组间覆盖。模型自身的定价方式不受影响——按量倍率模型仍乘
+// 全局模型倍率、固定价模型仍乘固定价、表达式模型仍按表达式求值，
+// 三类计费方式因此共用同一套语义，配置层不需要区分模型的计费方式。
+func applyGroupModelRatio(usingGroup, modelName string, groupRatioInfo *hosttypes.GroupRatioInfo) {
+	newGroupRatio, overridden := ratio_setting.ResolveGroupModelGroupRatio(usingGroup, modelName, groupRatioInfo.GroupRatio)
+	if !overridden {
+		return
+	}
+	groupRatioInfo.GroupRatio = newGroupRatio
+	// 命中即取代分组倍率：分组间覆盖同时失效，否则会继续叠乘
+	groupRatioInfo.GroupSpecialRatio = -1
+	groupRatioInfo.HasSpecialRatio = false
+}
+
+// RefreshGroupPricingForSelectedGroup 在每次选定渠道后重新解析与计费分组相关的定价。
+// 预扣费只算一次，但结算读的是 PriceData，而 auto 分组重试会把计费分组换掉，
+// 所以分组模型倍率必须跟着最终分组走，否则会出现「旧分组的倍率 × 新分组的分组倍率」。
+func RefreshGroupPricingForSelectedGroup(c *gin.Context, info *relaycommon.RelayInfo) {
+	groupRatioInfo := HandleGroupRatio(c, info)
+	applyGroupModelRatio(info.UsingGroup, info.OriginModelName, &groupRatioInfo)
+	info.PriceData.GroupRatioInfo = groupRatioInfo
+}
+
 func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta) (hosttypes.PriceData, error) {
 	modelPrice, usePrice := ratio_setting.GetModelPrice(info.OriginModelName, false)
 
 	groupRatioInfo := HandleGroupRatio(c, info)
+	// 分组模型倍率：命中则该值取代分组倍率，与模型走哪种计费方式无关
+	applyGroupModelRatio(info.UsingGroup, info.OriginModelName, &groupRatioInfo)
 
 	// Check if this model uses tiered_expr billing
 	if billing_setting.GetBillingMode(info.OriginModelName) == billing_setting.BillingModeTieredExpr {
@@ -99,15 +125,6 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		var success bool
 		var matchName string
 		modelRatio, success, matchName = ratio_setting.GetModelRatio(info.OriginModelName)
-		// 分组模型倍率（覆盖即最终价）：命中则该值为最终模型倍率，分组倍率归一为 1.0
-		if newModelRatio, newGroupRatio, overridden := ratio_setting.ResolveGroupModelPrice(info.UsingGroup, info.OriginModelName, modelRatio, groupRatioInfo.GroupRatio); overridden {
-			modelRatio = newModelRatio
-			success = true
-			groupRatioInfo.GroupRatio = newGroupRatio
-			groupRatioInfo.GroupSpecialRatio = -1
-			groupRatioInfo.HasSpecialRatio = false
-			groupRatioInfo.ModelRatioOverridden = true
-		}
 		if !success {
 			acceptUnsetRatio := false
 			if info.UserSetting.AcceptUnsetRatioModel {
@@ -195,6 +212,8 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 // ModelPriceHelperPerCall 按次/按量计费的 PriceHelper (MJ、Task)
 func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (hosttypes.PriceData, error) {
 	groupRatioInfo := HandleGroupRatio(c, info)
+	// 分组模型倍率：命中则该值取代分组倍率，与模型走哪种计费方式无关
+	applyGroupModelRatio(info.UsingGroup, info.OriginModelName, &groupRatioInfo)
 
 	modelPrice, success := ratio_setting.GetModelPrice(info.OriginModelName, true)
 	usePrice := success
@@ -209,15 +228,6 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (hostt
 			var ratioSuccess bool
 			var matchName string
 			modelRatio, ratioSuccess, matchName = ratio_setting.GetModelRatio(info.OriginModelName)
-			// 分组模型倍率（覆盖即最终价）：命中则该值为最终模型倍率，分组倍率归一为 1.0
-			if newModelRatio, newGroupRatio, overridden := ratio_setting.ResolveGroupModelPrice(info.UsingGroup, info.OriginModelName, modelRatio, groupRatioInfo.GroupRatio); overridden {
-				modelRatio = newModelRatio
-				ratioSuccess = true
-				groupRatioInfo.GroupRatio = newGroupRatio
-				groupRatioInfo.GroupSpecialRatio = -1
-				groupRatioInfo.HasSpecialRatio = false
-				groupRatioInfo.ModelRatioOverridden = true
-			}
 			acceptUnsetRatio := false
 			if info.UserSetting.AcceptUnsetRatioModel {
 				acceptUnsetRatio = true
@@ -271,26 +281,21 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (hostt
 }
 
 // HasModelBillingConfig 判断模型是否已配置计费方式。
-// groups 是判断视角下的可用分组集合：分组模型倍率覆盖单独存在（模型没有配置全局倍率）时
-// 该模型对这些分组也是可计费的，判定必须与 ModelPriceHelper 一致，
-// 否则会出现「能按覆盖价计费、却被排除在模型列表之外」。
-func HasModelBillingConfig(modelName string, groups []string) bool {
+// 用于 ListModels 过滤和 Gemini 非思考变体探测。
+// 分组模型倍率不参与判定：它只取代分组倍率，不给模型定价，
+// 所以没有全局倍率的模型不会因为配了分组模型倍率就变成可计费。
+func HasModelBillingConfig(modelName string) bool {
+	// 表达式计费的模型只由表达式定价：全局倍率不能让一个没有表达式的模型变成可计费，
+	// 否则它会进入模型列表，实际调用时却在计费阶段报错。
+	if billing_setting.GetBillingMode(modelName) == billing_setting.BillingModeTieredExpr {
+		expr, ok := billing_setting.GetBillingExpr(modelName)
+		return ok && strings.TrimSpace(expr) != ""
+	}
 	if _, ok := ratio_setting.GetModelPrice(modelName, false); ok {
 		return true
 	}
-	if _, ok, _ := ratio_setting.GetModelRatio(modelName); ok {
-		return true
-	}
-	for _, group := range groups {
-		if _, ok := ratio_setting.GetGroupModelRatio(group, modelName); ok {
-			return true
-		}
-	}
-	if billing_setting.GetBillingMode(modelName) != billing_setting.BillingModeTieredExpr {
-		return false
-	}
-	expr, ok := billing_setting.GetBillingExpr(modelName)
-	return ok && strings.TrimSpace(expr) != ""
+	_, ok, _ := ratio_setting.GetModelRatio(modelName)
+	return ok
 }
 
 func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta, groupRatioInfo hosttypes.GroupRatioInfo) (hosttypes.PriceData, error) {

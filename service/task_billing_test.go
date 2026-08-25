@@ -1295,25 +1295,25 @@ func makeRatioBilledTask(userID, channelID, tokenID, preConsumed int, group, mod
 	return task
 }
 
-// TestRecalculateByTokens_AppliesGroupModelRatioOverride 保证异步任务的差额结算与预扣费
-// （ModelPriceHelperPerCall）应用同一套分组模型倍率语义。若结算侧漏掉覆盖，
-// 预扣时生效的覆盖倍率会被按全局 model_ratio × group_ratio 的重算结果抹掉。
-func TestRecalculateByTokens_AppliesGroupModelRatioOverride(t *testing.T) {
+// TestRecalculateByTokens_AppliesGroupModelRatio 保证异步任务的差额结算与预扣费
+// （ModelPriceHelperPerCall）应用同一套分组模型倍率语义。若结算侧漏掉它，
+// 预扣时生效的倍率会被按全局 model_ratio × group_ratio 的重算结果抹掉。
+func TestRecalculateByTokens_AppliesGroupModelRatio(t *testing.T) {
 	truncate(t)
 	ctx := context.Background()
 
 	const userID, tokenID, channelID = 40, 40, 40
-	// 预扣额度刻意取成「漏掉覆盖时的重算结果」5000：覆盖生效则退还 3000，
-	// 覆盖被抹掉则 delta 为 0、额度原样保留，两种结果可区分。
+	// 预扣额度刻意取成「漏掉分组模型倍率时的重算结果」5000：倍率生效则退还 3000，
+	// 被抹掉则 delta 为 0、额度原样保留，两种结果可区分。
 	const initQuota, preConsumed, tokenRemain = 100000, 5000, 50000
 	const totalTokens = 1000
 
-	// 覆盖倍率 2 → 1000 × 2 × 1.0 = 2000；
-	// 若漏掉覆盖则会按 1000 × 10 × 0.5 = 5000 结算。
+	// 分组模型倍率 0.2 → 1000 × 10 × 0.2 = 2000；
+	// 若漏掉它则会按 1000 × 10 × 0.5（分组倍率）= 5000 结算。
 	setTaskRatioSettings(t,
 		`{"gmr-task-model":10}`,
 		`{"gmr-task-group":0.5}`,
-		`{"gmr-task-group":{"gmr-task-model":2}}`,
+		`{"gmr-task-group":{"gmr-task-model":0.2}}`,
 	)
 
 	seedUser(t, userID, initQuota)
@@ -1329,9 +1329,10 @@ func TestRecalculateByTokens_AppliesGroupModelRatioOverride(t *testing.T) {
 	assert.Equal(t, initQuota+(preConsumed-2000), getUserQuota(t, userID))
 }
 
-// TestRecalculateByTokens_OverrideAloneEnablesTokenRecompute 覆盖单独存在（模型没有配置全局倍率）
-// 时，预扣费已把该模型当作按量计费；结算必须同样按 token 重算，否则用户会停留在预扣估算值上。
-func TestRecalculateByTokens_OverrideAloneEnablesTokenRecompute(t *testing.T) {
+// TestRecalculateByTokens_GroupModelRatioAloneDoesNotPrice 分组模型倍率只取代分组倍率、
+// 不给模型定价：模型没有配置全局倍率时它不构成按量计费，结算不得按 token 重算，
+// 否则会用 GetModelRatio 的兜底倍率给一个未定价的模型结算。
+func TestRecalculateByTokens_GroupModelRatioAloneDoesNotPrice(t *testing.T) {
 	truncate(t)
 	ctx := context.Background()
 
@@ -1339,11 +1340,11 @@ func TestRecalculateByTokens_OverrideAloneEnablesTokenRecompute(t *testing.T) {
 	const initQuota, preConsumed, tokenRemain = 100000, 2000, 50000
 	const totalTokens = 1000
 
-	// 全局倍率表里没有该模型，只有分组覆盖 3 → 1000 × 3 × 1.0 = 3000。
+	// 全局倍率表里没有该模型，只有分组模型倍率 0.3。
 	setTaskRatioSettings(t,
 		`{}`,
 		`{"gmr-task-group":0.5}`,
-		`{"gmr-task-group":{"gmr-only-model":3}}`,
+		`{"gmr-task-group":{"gmr-only-model":0.3}}`,
 	)
 
 	seedUser(t, userID, initQuota)
@@ -1355,13 +1356,14 @@ func TestRecalculateByTokens_OverrideAloneEnablesTokenRecompute(t *testing.T) {
 
 	RecalculateTaskQuotaByTokens(ctx, task, totalTokens)
 
-	assert.Equal(t, 3000, task.Quota)
-	assert.Equal(t, initQuota-(3000-preConsumed), getUserQuota(t, userID))
+	// 未发生 token 重算：预扣额度原样保留。
+	assert.Equal(t, preConsumed, task.Quota)
+	assert.Equal(t, initQuota, getUserQuota(t, userID))
 }
 
-// TestRecalculateByTokens_FixedPriceModelIgnoresOverride 固定价格计费的模型在预扣费时不适用
-// 分组模型倍率；结算必须保持同样的优先级，不能因为存在覆盖就切换成按 token 重算。
-func TestRecalculateByTokens_FixedPriceModelIgnoresOverride(t *testing.T) {
+// TestRecalculateByTokens_FixedPriceModelIgnoresGroupModelRatio 固定价格计费的模型不适用
+// 分组模型倍率；结算必须保持同样的优先级，不能因为存在该配置就切换成按 token 重算。
+func TestRecalculateByTokens_FixedPriceModelIgnoresGroupModelRatio(t *testing.T) {
 	truncate(t)
 	ctx := context.Background()
 
@@ -1372,7 +1374,7 @@ func TestRecalculateByTokens_FixedPriceModelIgnoresOverride(t *testing.T) {
 	setTaskRatioSettings(t,
 		`{}`,
 		`{"gmr-task-group":0.5}`,
-		`{"gmr-task-group":{"gmr-fixed-model":3}}`,
+		`{"gmr-task-group":{"gmr-fixed-model":0.3}}`,
 	)
 
 	origPrice := ratio_setting.ModelPrice2JSONString()

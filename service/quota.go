@@ -120,8 +120,8 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 		actualGroupRatio = userGroupRatio
 	}
 
-	// 分组模型倍率（覆盖即最终价）：命中则最终倍率为覆盖值，分组倍率归一为 1.0
-	modelRatio, actualGroupRatio, _ = ratio_setting.ResolveGroupModelPrice(relayInfo.UsingGroup, modelName, modelRatio, actualGroupRatio)
+	// 分组模型倍率：命中则该值取代分组倍率，模型倍率仍取全局值
+	actualGroupRatio, _ = ratio_setting.ResolveGroupModelGroupRatio(relayInfo.UsingGroup, modelName, actualGroupRatio)
 
 	quotaInfo := QuotaInfo{
 		InputDetails: TokenDetails{

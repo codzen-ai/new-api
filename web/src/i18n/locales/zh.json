@@ -5333,7 +5333,6 @@
     "A billing var that contributes a multiplier must declare max or enum": "参与计费倍率的计费变量必须声明 max 或 enum",
     "Nested JSON: group →": "嵌套 JSON：分组 →",
     "Per-group model ratio": "分组模型倍率",
-    "sets the final model ratio for that group (the group ratio no longer applies to that model). Only affects token-ratio billed models.": "设置该分组下该模型的最终倍率（分组倍率对该模型不再生效）。仅对按量倍率计费的模型有效。",
-    "These models are billed by fixed price or expression, so the ratio set here will not take effect: {{models}}": "这些模型按固定价或表达式计费，此处设置的倍率不会生效：{{models}}"
+    "is that model's group ratio in that group: it replaces the group ratio and any inter-group override, while the model keeps its own pricing (global model ratio, fixed price, or billing expression).": "就是这个模型在这个分组的分组倍率：它取代分组倍率和分组间覆盖，模型自身的定价方式（全局模型倍率、固定价或计费表达式）不变。"
   }
 }
