@@ -270,16 +270,22 @@ func HasModelBillingConfig(modelName string) bool
 | 旧值 = 0 | 保留 0（免费在两种语义下同义），不做除法 |
 | 无全局倍率、或全局倍率 ≤ 0 | **丢弃该条目**并逐条写入 `SysError` |
 | 换算结果 NaN / Inf | 同上 |
-| **模型按固定价计费** | **丢弃该条目**，单独一条 `SysError` |
+| **模型按固定价或表达式（`tiered_expr`）计费** | **丢弃该条目**，单独一条 `SysError` |
 | 某分组全部条目被丢弃 | 该分组键一并移除 |
 
 前两类丢弃是因为新语义无法表达这类条目的原价格：留着会把绝对倍率当成系数，
 价格差出数量级。
 
-固定价那一类是另一个理由：这些条目在旧版本里**本来就不生效**，而新版本对固定价模型生效。
-换算后保留等于让一批从未生效的配置突然开始影响价格，所以一并丢弃，日志里单独说明。
-判定与 `ModelPriceHelperPerCall` 一致（`GetModelPrice` + `GetDefaultModelPriceMap`），
-包含「同时配了固定价和全局倍率」这种能换算但不该换算的情况。
+固定价与表达式那一类是另一个理由：这些条目在旧版本里**本来就不生效**——旧的
+`ModelPriceHelper` 在读取分组模型倍率之前，就已经沿 `tiered_expr` 分支或固定价分支返回了；
+而新版本对这两类模型都生效。换算后保留等于让一批从未生效的配置突然开始影响价格，
+所以一并丢弃，日志里单独说明。
+
+判定顺序与 `ModelPriceHelper` 一致：先看 `billing_setting.GetBillingMode` 是否为
+`tiered_expr`，再看固定价（`GetModelPrice` + `GetDefaultModelPriceMap`，与
+`ModelPriceHelperPerCall` 一致）。两者都覆盖「同时配了全局倍率」这种能换算但不该换算的
+情况——表达式模型的最终额度是 `expr(...) × 分组倍率`，全局倍率根本不参与计价，
+除以它得到的系数没有意义。
 
 两类日志都给出 `分组/模型=原倍率` 便于管理员重新配置。
 
@@ -351,7 +357,7 @@ func HasModelBillingConfig(modelName string) bool
 | 解析器 | `setting/ratio_setting/group_model_ratio_test.go` | 命中 / 未命中 / 值为 0 / 分组隔离 / 模型倍率不被替换 |
 | 计价端到端 | `relay/helper/price_test.go` | 按量 / 固定价 / 阶梯三条路径的注入（含按次预扣）、分组间覆盖失效、auto 分组换组后重解析、`HasModelBillingConfig` 不认分组模型倍率与 `tiered_expr` 短路 |
 | 任务结算 | `service/task_billing_test.go` | 倍率生效、单独存在时不构成定价、固定价不重算 |
-| 语义迁移 | `model/group_model_ratio_migration_test.go` | 换算公式、无法换算与固定价条目被丢弃、幂等、空配置也写标记 |
+| 语义迁移 | `model/group_model_ratio_migration_test.go` | 换算公式、无法换算与固定价 / 表达式条目被丢弃、幂等、空配置也写标记 |
 | 前端定价 | `web/src/features/pricing/lib/__tests__/group-model-ratio-price.test.ts`（按量 + 固定价）、`group-model-ratio-dynamic-price.test.ts`（阶梯） | 取代分组倍率、最低价比较、0 倍率保留 |
 
 前端断言一律用「等价配置产出同一价格」的形式，不断言货币字符串字面量——
