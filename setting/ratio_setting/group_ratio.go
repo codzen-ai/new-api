@@ -26,7 +26,8 @@ var defaultGroupGroupRatio = map[string]map[string]float64{
 var groupGroupRatioMap = types.NewRWMap[string, map[string]float64]()
 
 // 分组模型倍率：GroupModelRatio[group][model] = ratio
-// 语义（覆盖即最终价）：命中即为该分组下该模型的最终倍率，分组倍率对其失效。
+// 语义：该值就是这个模型在这个分组的分组倍率——取代 GroupRatio / GroupGroupRatio，
+// 但模型自身的定价方式（全局模型倍率、计费表达式）照常生效。
 var defaultGroupModelRatio = map[string]map[string]float64{}
 
 var groupModelRatioMap = types.NewRWMap[string, map[string]float64]()
@@ -114,7 +115,7 @@ func UpdateGroupGroupRatioByJSONString(jsonStr string) error {
 	return types.LoadFromJsonString(groupGroupRatioMap, jsonStr)
 }
 
-// GetGroupModelRatio 返回某分组下某模型的模型倍率覆盖；不存在返回 (-1, false)。
+// GetGroupModelRatio 返回某分组下某模型的分组模型倍率；不存在返回 (-1, false)。
 func GetGroupModelRatio(group, model string) (float64, bool) {
 	gm, ok := groupModelRatioMap.Get(group)
 	if !ok {
@@ -127,7 +128,7 @@ func GetGroupModelRatio(group, model string) (float64, bool) {
 	return ratio, true
 }
 
-// GetGroupModelRatioByGroup 返回某分组下的模型倍率覆盖表副本；无覆盖返回 (nil, false)。
+// GetGroupModelRatioByGroup 返回某分组下的分组模型倍率表副本；无条目返回 (nil, false)。
 func GetGroupModelRatioByGroup(group string) (map[string]float64, bool) {
 	gm, ok := groupModelRatioMap.Get(group)
 	if !ok || len(gm) == 0 {
@@ -140,7 +141,12 @@ func GetGroupModelRatioByGroup(group string) (map[string]float64, bool) {
 	return out, true
 }
 
-// GetGroupModelRatioForUsableGroups 返回限定在给定可用分组内的分组模型倍率覆盖。
+// GetGroupModelRatioCopy 返回整张分组模型倍率表；外层是副本，内层表只读。
+func GetGroupModelRatioCopy() map[string]map[string]float64 {
+	return groupModelRatioMap.ReadAll()
+}
+
+// GetGroupModelRatioForUsableGroups 返回限定在给定可用分组内的分组模型倍率。
 // 供定价接口使用：只暴露用户可用分组的价格，避免专属/私有分组的价格外泄。
 func GetGroupModelRatioForUsableGroups(usableGroups map[string]string) map[string]map[string]float64 {
 	result := make(map[string]map[string]float64)
@@ -152,14 +158,17 @@ func GetGroupModelRatioForUsableGroups(usableGroups map[string]string) map[strin
 	return result
 }
 
-// ResolveGroupModelPrice 应用「覆盖即最终价」语义。
-// 命中分组模型倍率 → (override, 1.0, true)：覆盖值为最终模型倍率，分组倍率归一为 1.0。
-// 未命中 → (baseModelRatio, baseGroupRatio, false)：回退全局倍率 × 分组倍率。
-func ResolveGroupModelPrice(usingGroup, model string, baseModelRatio, baseGroupRatio float64) (modelRatio float64, groupRatio float64, overridden bool) {
+// ResolveGroupModelGroupRatio 返回某模型在某分组实际生效的分组倍率。
+// 命中分组模型倍率 → (该值, true)：它取代分组倍率，分组间覆盖同时失效。
+// 未命中 → (baseGroupRatio, false)。
+//
+// 只决定分组倍率是这个语义的全部：模型自身的定价方式（全局模型倍率 / 计费表达式）
+// 照常生效，因此一个没有配全局倍率的模型不会因为配了分组模型倍率就变成可计费的。
+func ResolveGroupModelGroupRatio(usingGroup, model string, baseGroupRatio float64) (groupRatio float64, overridden bool) {
 	if override, ok := GetGroupModelRatio(usingGroup, model); ok {
-		return override, 1.0, true
+		return override, true
 	}
-	return baseModelRatio, baseGroupRatio, false
+	return baseGroupRatio, false
 }
 
 func GroupModelRatio2JSONString() string {
