@@ -75,8 +75,6 @@ function Fixture(props: {
         form={form}
         onSave={props.onSave ?? (async () => {})}
         isSaving={props.isSaving ?? false}
-        modelPrice='{}'
-        billingMode='{}'
       />
     </SettingsPageProvider>
   )
