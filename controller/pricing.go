@@ -64,7 +64,7 @@ func GetPricing(c *gin.Context) {
 		}
 	}
 
-	// 分组模型倍率：仅返回用户可用分组的覆盖，避免泄露专属/私有分组价格
+	// 分组模型倍率：仅返回用户可用分组的条目，避免泄露专属/私有分组价格
 	groupModelRatio := ratio_setting.GetGroupModelRatioForUsableGroups(usableGroup)
 
 	c.JSON(200, gin.H{
