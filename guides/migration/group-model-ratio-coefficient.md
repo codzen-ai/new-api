@@ -35,6 +35,9 @@ SELECT value FROM options WHERE "key" = 'GroupModelRatio';
    **少收到 1/10**。回滚必须连数据一起回滚，而那需要迁移前的原始值 → 所以必须先备份。
 2. **多节点必须主节点先行。** 从节点按新语义解释库里的值，主节点还没迁移完就先起从节点，
    这段时间会把旧的绝对倍率当成系数，**超收一个数量级**。
+   单节点也别掉以轻心：蓝绿 / 滚动部署会让新旧容器并存几分钟，旧容器同样会按旧语义
+   读已经换算过的值（方向相反，**少收**），见
+   [部署窗口问题](deploying-semantic-migrations.md)。
 3. **有存量配置时迁移失败会导致进程退出**（这是故意的）。日志里是
    `[FATAL] ... migration left an unsafe state`。修好数据库问题后重启，迁移会重新尝试。
 
@@ -156,6 +159,9 @@ SELECT value FROM options WHERE "key" = 'GroupModelRatio';
 ### 7. 起从节点
 
 确认步骤 4、5 都通过后，再把从节点升级并启动。
+
+单节点用蓝绿 / 滚动部署的，这一步换成：确认旧容器已被移除（`docker ps` 只剩一个），
+并按 [部署窗口问题](deploying-semantic-migrations.md) 核查重叠窗口里有没有受影响分组的消费记录。
 
 ## 失败处理
 
