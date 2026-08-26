@@ -215,6 +215,10 @@ DELETE FROM options WHERE "key" = 'GroupModelRatioSemantics';
 
 ### 多节点部署要主节点先行
 
+> 蓝绿 / 滚动部署的单节点站点有同类问题（新旧容器并存的窗口），见
+> [部署窗口问题](../migration/deploying-semantic-migrations.md)。
+
+
 迁移只在主节点（`NODE_TYPE` 不是 `slave`）执行，从节点靠选项同步（默认 60 秒）拿结果。
 从节点是按**新语义**解释库里的值的，所以如果从节点先升级、主节点还没迁移完，
 这段时间它会把旧的绝对倍率当成系数，超收一个数量级。
