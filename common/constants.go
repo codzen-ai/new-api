@@ -184,6 +184,11 @@ var RelayResponseHeaderTimeout int // unit is second
 var RelayMaxIdleConns int
 var RelayMaxIdleConnsPerHost int
 
+// LogExportMaxCount caps how many rows one CSV log export may contain.
+// The server streams rows in batches, so the bound protects the browser (which
+// buffers the whole file) and proxy timeouts, not server memory.
+var LogExportMaxCount = 500_000
+
 var GeminiSafetySetting string
 
 // https://docs.cohere.com/docs/safety-modes Type; NONE/CONTEXTUAL/STRICT
