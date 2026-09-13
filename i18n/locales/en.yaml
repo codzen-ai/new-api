@@ -93,5 +93,5 @@ channel.upstream_update_failed_channels: "Failed channel IDs (showing {{.Shown}}
 channel.upstream_update_more_omitted: " ({{.Count}} more omitted)"
 
 # Log messages
-log.export_too_many: "Too many records, please narrow your search range (max 100,000)"
+log.export_too_many: "Too many records, please narrow your search range (max {{.Max}})"
 log.export_failed: "Log export failed, please try again later"
