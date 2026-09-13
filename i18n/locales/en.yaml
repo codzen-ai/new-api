@@ -276,7 +276,7 @@ distributor.invalid_midjourney_request: "Invalid Midjourney request: {{.Error}}"
 distributor.invalid_request_parse_model: "Invalid request, unable to parse model"
 
 # Log messages
-log.export_too_many: "Too many records, please narrow your search range (max 100,000)"
+log.export_too_many: "Too many records, please narrow your search range (max {{.Max}})"
 log.export_failed: "Log export failed, please try again later"
 
 # Custom OAuth provider messages

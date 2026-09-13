@@ -277,7 +277,7 @@ distributor.invalid_midjourney_request: "無效的midjourney請求，{{.Error}}"
 distributor.invalid_request_parse_model: "無效的請求，無法解析模型"
 
 # Log messages
-log.export_too_many: "記錄數量超出限制，請縮小查詢範圍（最多 10 萬筆）"
+log.export_too_many: "記錄數量超出限制，請縮小查詢範圍（最多 {{.Max}} 筆）"
 log.export_failed: "日誌匯出失敗，請稍後重試"
 
 # Custom OAuth provider messages

@@ -159,8 +159,6 @@ func GetLogsSelfStat(c *gin.Context) {
 	return
 }
 
-const logExportMaxCount = 100_000
-
 // The export is a customer-facing reconciliation statement, so it carries only
 // what a customer needs to verify a charge. Channel, IP and request content are
 // deliberately absent: they expose upstream routing and the customer's own
@@ -749,8 +747,8 @@ func ExportAllLogs(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
 		return
 	}
-	if total > logExportMaxCount {
-		common.ApiErrorI18n(c, i18n.MsgLogExportTooMany)
+	if total > int64(common.LogExportMaxCount) {
+		common.ApiErrorI18n(c, i18n.MsgLogExportTooMany, map[string]any{"Max": common.LogExportMaxCount})
 		return
 	}
 
