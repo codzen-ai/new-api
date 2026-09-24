@@ -116,4 +116,4 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 ## 上游价目
 
-脚本内置的 `UPSTREAM_BASE_PRICE` 是上游基准单位价（图片按张 $0.04 / $0.013，视频按秒 $0.02），只用于预检时警告"配置价低于成本价"，不参与断言 —— 加价多少是运营决策。上游调价后同步更新那个表，方案文档 `specifications/mulerouter-async-task-gateway.md` 第 9 节有价目来源。
+脚本内置的 `UPSTREAM_BASE_PRICE` 是上游基准单位价（图片按张 $0.04 / $0.013，视频按秒 $0.02），只用于预检时警告"配置价低于成本价"，不参与断言 —— 加价多少是运营决策。上游调价后同步更新那个表，方案文档 `specifications/implemented/mulerouter-async-task-gateway.md` 第 9 节有价目来源。

@@ -7,7 +7,7 @@ description: Rebase the local `staging` branch onto the latest upstream `main`. 
 
 This fork keeps **one** custom history, on `staging`. `production` is not an independent
 branch to rebase — it is a pointer to a `staging` commit that has been verified in the
-staging environment (see `specifications/git-workflow.md`). So "sync with upstream" always
+staging environment (see `specifications/implemented/git-workflow.md`). So "sync with upstream" always
 means: rebase `staging` onto `main`.
 
 If the user asks to "rebase production", say what this skill does instead and proceed on
