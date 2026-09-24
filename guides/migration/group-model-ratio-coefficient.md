@@ -4,7 +4,7 @@
 升级前必须备份什么、启动后如何确认成功、失败时怎么处理、以及怎么回滚。
 
 功能说明见 [guides/admin/group-model-ratio.md](../admin/group-model-ratio.md)，
-设计与失败模式见 [specifications/group-model-ratio.md](../../specifications/group-model-ratio.md) §6。
+设计与失败模式见 [specifications/implemented/group-model-ratio.md](../../specifications/implemented/group-model-ratio.md) §6。
 
 ## 这次迁移做什么
 

@@ -2,7 +2,7 @@
 
 面向管理员。这份文档说明如何给某个分组下的某个模型单独定价，而不影响该分组的其他模型，也不影响其他分组。
 
-终端用户看的文档是 [group-pricing.md](../user/group-pricing.md)。设计文档是 [group-model-ratio.md](../../specifications/group-model-ratio.md)。
+终端用户看的文档是 [group-pricing.md](../user/group-pricing.md)。设计文档是 [group-model-ratio.md](../../specifications/implemented/group-model-ratio.md)。
 
 ## 这个功能解决什么
 
