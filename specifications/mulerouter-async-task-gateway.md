@@ -175,8 +175,8 @@ MuleRouter 对 `prompt_extend` 统一收 **$0.001/次**，是个**加法**项；
 
 [constant/channel.go](../constant/channel.go)：
 
-- `ChannelTypeMuleRouter = 61`，插在 `ChannelTypeNewAPI = 60` 与 `ChannelTypeDummy` 之间。
-- `ChannelBaseURLs` 是按下标索引的 slice，**必须同步追加** `"https://api.mulerouter.ai"` 到下标 61，否则 `ChannelBaseURLs[61]` 直接 panic。
+- `ChannelTypeMuleRouter = 64`，插在 `ChannelTypeSGLang = 63` 与 `ChannelTypeDummy` 之间（最初是 61，上游把 61–63 分给 Task Plugin / vLLM / SGLang 后改到 64，见第 12 节）。
+- `ChannelBaseURLs` 是按下标索引的 slice，**必须同步追加** `"https://api.mulerouter.ai"` 到下标 64，否则 `ChannelBaseURLs[64]` 直接 panic。
   该 const 块没有 `iota`，`ChannelTypeDummy` 会复用上一行字面值，插入新常量后需确认它仍符合"计数哨兵"用途。
 - `ChannelTypeNames[ChannelTypeMuleRouter] = "MuleRouter"`。
 
@@ -391,10 +391,10 @@ MuleRouter 任务量一大会同时造成：(a) 占满 1000 的取数配额，�
 
 ### 7.3 两条非计费副作用
 
-1. **`ChannelTypeDummy` 会从 60 变成 61**——那个 const 块没有 `iota`，`ChannelTypeDummy`
+1. **`ChannelTypeDummy` 会跟着变成 64**——那个 const 块没有 `iota`，`ChannelTypeDummy`
    复用上一行字面值。它被 [controller/model.go:97](../controller/model.go#L97) 用作循环上界
    构建 `channelId2Models`。只影响 `/v1/models` 的展示，但需确认
-   `ChannelType2APIType(61)` 返回 `false` 从而被跳过，否则会用默认 adaptor 的模型列表污染列表。
+   `ChannelType2APIType(64)` 返回 `false` 从而被跳过，否则会用默认 adaptor 的模型列表污染列表。
 2. **`/vendors` 路由组不与现有路由冲突**——根级已有 `/:mode/mj` 参数路由与 `/v1`、`/mj`、
    `/suno` 静态段共存，说明 gin 容忍静态段与参数段同级，新增 `/vendors` 安全。
 
@@ -504,3 +504,13 @@ MuleRouter 任务量一大会同时造成：(a) 占满 1000 的取数配额，�
    默认值可以只用一种类型表达；并强制 `default` 必填——省略字段时若没有确定取值，计费就不确定。
 7. **保存时拒绝"有倍率但无上界"的声明。** 初版只在请求时校验边界；现在配置阶段就挡住
    `divisor > 0` 却既没有 `max` 也没有 `enum` 的变量，把无界乘数扼杀在配置里。
+
+## 12. 随上游任务插件化的移植
+
+上游用沙箱化的 JS 任务插件取代了全部内置 Go 任务适配器（#7076），并把渠道类型 61–63 分给 Task Plugin / vLLM / SGLang。MuleRouter 的路由是渠道配置而不是插件，任何插件代次都解析不到它，因此保留为插件体系之外唯一的 Go 任务适配器，按新接口移植：
+
+1. **渠道类型改为 64。** 类型 61 在上游表示 Task Plugin，沿用会让存量 MuleRouter 渠道被当作 Task Plugin 渠道。主节点启动时 `model.MigrateMuleRouterChannelType` 把类型 61 且带 `mulerouter` 配置的渠道改为 64，并把这些渠道任务的 `platform` 从 `"61"` 改为 `"64"`，未完成任务的轮询与查询才能找回适配器。上游的 Task Plugin 渠道没有 `mulerouter` 配置，不会被误改；迁移完成后没有可匹配的行，重复执行安全。
+2. **适配器分发。** `GetTaskAdaptor` 与 `getTaskAdaptorForRequest` 在查插件之前先识别 MuleRouter 平台。`/v1/video/generations` 上没有插件认领的模型会回落到原来的 `RelayTask`，所以视频路由照常可用。
+3. **解析与响应分离。** 新接口要求解析提交响应时不写客户端（任务落库、结算之后才统一输出），`DoResponse` 因此拆成只解析的 `ParseResponse` 和由 `presentTaskSubmission` 调用的 `mulerouter.SubmitResponse`，后者按 `mulerouter_native_route` 回 MuleRouter 形状（202）或 OpenAI video 形状。
+4. **轮询签名。** `FetchTask` 现在直接拿到任务，查询 URL 从 `task.Properties.UpstreamModelName` 反解，第 11 节第 5 条对轮询 body map 的改动随之不再需要。
+
