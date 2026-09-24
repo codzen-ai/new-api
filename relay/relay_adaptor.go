@@ -37,6 +37,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/sub2api"
 	"github.com/QuantumNous/new-api/relay/channel/submodel"
 	jspluginadaptor "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
+	taskmulerouter "github.com/QuantumNous/new-api/relay/channel/task/mulerouter"
 	"github.com/QuantumNous/new-api/relay/channel/tencent"
 	"github.com/QuantumNous/new-api/relay/channel/vertex"
 	"github.com/QuantumNous/new-api/relay/channel/volcengine"
@@ -186,11 +187,21 @@ func TaskPlatformUnavailableError(platform constant.TaskPlatform) (string, strin
 }
 
 func GetTaskAdaptor(platform constant.TaskPlatform) channel.TaskAdaptor {
+	if isMuleRouterPlatform(platform) {
+		return &taskmulerouter.TaskAdaptor{}
+	}
 	plugin, ok := ResolveTaskPluginForPlatform(pluginruntime.DefaultRegistry.Generation(), platform)
 	if !ok {
 		return nil
 	}
 	return jspluginadaptor.New(plugin)
+}
+
+// isMuleRouterPlatform reports the one built-in Go task adaptor kept beside
+// the plugin system: MuleRouter's routes are channel configuration, not a
+// plugin, so no plugin generation can resolve them.
+func isMuleRouterPlatform(platform constant.TaskPlatform) bool {
+	return platform == constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeMuleRouter))
 }
 
 // getTaskAdaptorForRequest preserves the exact plugin object pinned by the
@@ -219,6 +230,9 @@ func getTaskAdaptorForRequest(c *gin.Context, platform constant.TaskPlatform) (c
 			}
 			return platform, nil
 		}
+	}
+	if isMuleRouterPlatform(platform) {
+		return platform, &taskmulerouter.TaskAdaptor{}
 	}
 	generation := pluginruntime.DefaultRegistry.Generation()
 	plugin, ok := ResolveTaskPluginForPlatform(generation, platform)

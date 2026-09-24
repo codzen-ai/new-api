@@ -138,7 +138,8 @@ type ChannelOtherSettings struct {
 	// ToolLossPolicy is a channel-level opt-in for request-phase conversion
 	// rejection. Empty follows the default allow policy. Accepted values:
 	// "", "allow", "safe", "strict".
-	ToolLossPolicy string `json:"tool_loss_policy,omitempty"`
+	ToolLossPolicy string            `json:"tool_loss_policy,omitempty"`
+	MuleRouter     *MuleRouterConfig `json:"mulerouter,omitempty"`
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
