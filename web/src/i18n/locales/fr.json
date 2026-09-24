@@ -1469,6 +1469,7 @@
     "Connect to OpenAI Sora video generation services": "Connecter les services de génération vidéo OpenAI Sora",
     "Connect to Perplexity model services": "Connecter les services de modèles Perplexity",
     "Connect to self-hosted models served by SGLang": "Connecter des modèles auto-hébergés avec SGLang",
+    "Relay MuleRouter asynchronous vendor endpoints through a configurable route table": "Relayer les points de terminaison asynchrones des fournisseurs MuleRouter via une table de routage configurable",
     "Connect to self-hosted models served by vLLM": "Connecter des modèles auto-hébergés avec vLLM",
     "Connect to self-hosted models served by Xinference": "Connecter des modèles auto-hébergés avec Xinference",
     "Connect to SiliconFlow model inference services": "Connecter les services d’inférence de modèles SiliconFlow",
@@ -7359,6 +7360,18 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "MuleRouter Routes": "Routes MuleRouter",
+    "Route table in JSON. Each route maps /vendors/{vendor}/v1/{model}/{action} to the model name \"{vendor}/{model}/{action}\". Every request field that scales cost must be declared in billing_vars with bounds; undeclared cost fields are rejected at request time.": "Table de routage au format JSON. Chaque route associe /vendors/{vendor}/v1/{model}/{action} au nom de modèle \"{vendor}/{model}/{action}\". Tout champ de requête qui influence le coût doit être déclaré dans billing_vars avec ses bornes ; les champs de coût non déclarés sont rejetés lors de la requête.",
+    "MuleRouter route table is required": "La table de routage MuleRouter est obligatoire",
+    "MuleRouter route table must be a JSON object": "La table de routage MuleRouter doit être un objet JSON",
+    "MuleRouter route table requires at least one route": "La table de routage MuleRouter requiert au moins une route",
+    "Every MuleRouter route requires vendor and model": "Chaque route MuleRouter requiert vendor et model",
+    "MuleRouter routes must map to distinct models": "Les routes MuleRouter doivent correspondre à des modèles distincts",
+    "Every billing var requires a name": "Chaque variable de facturation requiert un name",
+    "Every billing var must be of kind int or enum": "Chaque variable de facturation doit être de type int ou enum",
+    "Every billing var requires a default": "Chaque variable de facturation requiert un default",
+    "Every enum billing var requires values": "Chaque variable de facturation de type enum requiert values",
+    "A billing var that contributes a multiplier must declare max or enum": "Une variable de facturation qui produit un multiplicateur doit déclarer max ou enum"
   }
 }
