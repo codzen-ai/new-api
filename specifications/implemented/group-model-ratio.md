@@ -8,8 +8,8 @@
 > 状态：已实现。语义在 2026-08 从「覆盖即最终价」改为系数并带数据迁移（见 §2.2、§6）。
 > 基线：`staging`（2026-08-25）。
 
-面向管理员的操作说明见 [guides/admin/group-model-ratio.md](../guides/admin/group-model-ratio.md)，
-面向终端用户的影响说明见 [guides/user/group-pricing.md](../guides/user/group-pricing.md)。
+面向管理员的操作说明见 [guides/admin/group-model-ratio.md](../../guides/admin/group-model-ratio.md)，
+面向终端用户的影响说明见 [guides/user/group-pricing.md](../../guides/user/group-pricing.md)。
 
 ## 1. 结论先行
 
@@ -250,7 +250,7 @@ func HasModelBillingConfig(modelName string) bool
 
 ## 6. 语义迁移（绝对值 → 系数）
 
-> 运维操作手册：[guides/migration/group-model-ratio-coefficient.md](../guides/migration/group-model-ratio-coefficient.md)。
+> 运维操作手册：[guides/migration/group-model-ratio-coefficient.md](../../guides/migration/group-model-ratio-coefficient.md)。
 
 第一版的 `GroupModelRatio` 是绝对值语义。同一个数字在两种语义下都合法且无法判别，
 所以迁移必须是一次性的、带标记位的数据改写，而不是运行时兼容。

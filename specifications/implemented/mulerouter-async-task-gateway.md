@@ -42,12 +42,12 @@ DELETE /vendors/{vendor}/v1/{model}/{action}/{task_id}    → 取消任务
 
 ## 2. 现状：当前完全不支持
 
-- **路由层无此路径。** 入口路由是硬编码枚举（[relay-router.go](../router/relay-router.go)、[video-router.go](../router/video-router.go)），只有 `/v1/*`、`/mj`、`/suno`、`/kling/v1`、`/jimeng`，没有 `/vendors/` 前缀。
-- **异步任务适配器没有该平台。** `GetTaskAdaptor` 按渠道类型分发（[relay_adaptor.go:144-174](../relay/relay_adaptor.go#L144-L174)），仅覆盖 suno / ali / kling / jimeng / vertex / vidu / doubao / sora / gemini / minimax。
+- **路由层无此路径。** 入口路由是硬编码枚举（[relay-router.go](../../router/relay-router.go)、[video-router.go](../../router/video-router.go)），只有 `/v1/*`、`/mj`、`/suno`、`/kling/v1`、`/jimeng`，没有 `/vendors/` 前缀。
+- **异步任务适配器没有该平台。** `GetTaskAdaptor` 按渠道类型分发（[relay_adaptor.go:144-174](../../relay/relay_adaptor.go#L144-L174)），仅覆盖 suno / ali / kling / jimeng / vertex / vidu / doubao / sora / gemini / minimax。
 - **`advanced_custom` 救不了。** 它的 `incoming_path → upstream_path` 只覆盖 chat / responses / messages / rerank 这类同步端点，不处理"提交-轮询"生命周期、任务落库与按任务结算。
 - 全仓库搜不到 `mulerouter` 任何引用。
 
-骨架是对得上的：`TaskAdaptor` 接口（[adapter.go:35-83](../relay/channel/adapter.go#L35-L83)）就是为"提交 + 轮询"设计的，轮询调度器 `DispatchPlatformUpdate` 的 `default` 分支已经接管所有数字平台（[task_polling.go:178-194](../service/task_polling.go#L178-L194)），本方案不需要改动框架层逻辑。
+骨架是对得上的：`TaskAdaptor` 接口（[adapter.go:35-83](../../relay/channel/adapter.go#L35-L83)）就是为"提交 + 轮询"设计的，轮询调度器 `DispatchPlatformUpdate` 的 `default` 分支已经接管所有数字平台（[task_polling.go:178-194](../../service/task_polling.go#L178-L194)），本方案不需要改动框架层逻辑。
 
 ## 3. 架构
 
@@ -74,7 +74,7 @@ GET  /vendors/carrothub/v1/wan2.2-i2v-spicy/generation/{task_id}
 **这条路径才是面向终端用户的。** 配上渠道模型重定向（短名 → 三段式内部名）之后，
 客户端只看到 `z-image-spicy` 这样的短名，路径和参数里都不出现上游厂商；原生 `/vendors/...`
 路径因为渠道模型列表里没有三段式全名而自然不可达。终端用户文档见
-[guides/user/image-video-generation.md](../guides/user/image-video-generation.md)。
+[guides/user/image-video-generation.md](../../guides/user/image-video-generation.md)。
 
 ### 3.1 内部模型名
 
@@ -93,7 +93,7 @@ GET  /vendors/carrothub/v1/wan2.2-i2v-spicy/generation/{task_id}
 ## 4. 渠道配置：路由与计费表
 
 新增渠道类型 **MuleRouter**，其 `ChannelOtherSettings` 增加一段配置（结构上对齐既有的
-`AdvancedCustomConfig`，见 [channel_settings.go:118](../relaykit/dto/channel_settings.go#L118)）：
+`AdvancedCustomConfig`，见 [channel_settings.go:118](../../relaykit/dto/channel_settings.go#L118)）：
 
 ```jsonc
 {
@@ -173,7 +173,7 @@ MuleRouter 对 `prompt_extend` 统一收 **$0.001/次**，是个**加法**项；
 
 ### 5.1 渠道类型注册
 
-[constant/channel.go](../constant/channel.go)：
+[constant/channel.go](../../constant/channel.go)：
 
 - `ChannelTypeMuleRouter = 64`，插在 `ChannelTypeSGLang = 63` 与 `ChannelTypeDummy` 之间（最初是 61，上游把 61–63 分给 Task Plugin / vLLM / SGLang 后改到 64，见第 12 节）。
 - `ChannelBaseURLs` 是按下标索引的 slice，**必须同步追加** `"https://api.mulerouter.ai"` 到下标 64，否则 `ChannelBaseURLs[64]` 直接 panic。
@@ -181,9 +181,9 @@ MuleRouter 对 `prompt_extend` 统一收 **$0.001/次**，是个**加法**项；
 - `ChannelTypeNames[ChannelTypeMuleRouter] = "MuleRouter"`。
 
 前端三处注册点（照 Vidu=52 抄）：
-[constants.ts:75](../web/src/features/channels/constants.ts#L75)、
-[channel-utils.ts:102](../web/src/features/channels/lib/channel-utils.ts#L102)、
-[model-categories.ts:142](../web/src/features/channels/lib/model-categories.ts#L142)。
+[constants.ts:75](../../web/src/features/channels/constants.ts#L75)、
+[channel-utils.ts:102](../../web/src/features/channels/lib/channel-utils.ts#L102)、
+[model-categories.ts:142](../../web/src/features/channels/lib/model-categories.ts#L142)。
 渠道编辑页需要一个路由表编辑器（可先做 JSON 文本框，参照 advanced_custom 的现有形态）。
 
 ### 5.2 路由
@@ -207,7 +207,7 @@ g.Use(middleware.MuleRouterRequestConvert(), middleware.TokenAuth(), middleware.
 
 ### 5.3 请求转换中间件
 
-`middleware/mulerouter_adapter.go`，职责对照现成的 [kling_adapter.go](../middleware/kling_adapter.go)：
+`middleware/mulerouter_adapter.go`，职责对照现成的 [kling_adapter.go](../../middleware/kling_adapter.go)：
 
 1. 解析 `vendor` / `model` / `action` / `task_id`，打上 `mulerouter_native_route` 标记
    （响应形态由它决定：原生路由回 MuleRouter 形状，统一路由回 OpenAI video 形状）；
@@ -218,18 +218,18 @@ g.Use(middleware.MuleRouterRequestConvert(), middleware.TokenAuth(), middleware.
 **渠道未定时如何查路由表？** 中间件跑在 `Distribute` 之前，拿不到渠道配置。
 所以中间件只做无状态的路径解析与 body 改写；路由表查找与 `billing_vars` 校验下沉到
 `TaskAdaptor.ValidateRequestAndSetAction`——它在 `RelayTaskSubmit` 里跑在
-`InitChannelMeta` 之后、`EstimateBilling`/预扣费之前（[relay_task.go:145-205](../relay/relay_task.go#L145-L205)），
+`InitChannelMeta` 之后、`EstimateBilling`/预扣费之前（[relay_task.go:145-205](../../relay/relay_task.go#L145-L205)），
 既拿得到渠道配置，又还来得及在扣费前拒绝请求。中间件保持薄，安全校验全部在 adaptor 内完成。
 
 **模型识别不靠改写路径。** `getModelRequest` 是按路径前缀分派的 if/else 链
-（[distributor.go:253](../middleware/distributor.go#L253)），因此在其中新增一个 `/vendors/` 分支，
+（[distributor.go:253](../../middleware/distributor.go#L253)），因此在其中新增一个 `/vendors/` 分支，
 与既有的 `/suno/`、`/mj/` 分支同构：POST 从 body 读 model，GET 置
 `shouldSelectChannel = false` 并设 `RelayModeMuleRouterFetchByID`。这比在中间件里把
 `c.Request.URL.Path` 改写成 `/v1/video/generations` 更直白，也不会让后续读路径的代码看到假路径。
 
 ### 5.4 适配器：`relay/channel/task/mulerouter/`
 
-以 [vidu/adaptor.go](../relay/channel/task/vidu/adaptor.go) 为模板：
+以 [vidu/adaptor.go](../../relay/channel/task/vidu/adaptor.go) 为模板：
 
 | 文件 | 内容 |
 |---|---|
@@ -277,7 +277,7 @@ g.Use(middleware.MuleRouterRequestConvert(), middleware.TokenAuth(), middleware.
 
 ### 5.5 查询响应
 
-新增 `RelayModeMuleRouterFetchByID` 与 `fetchRespBuilders` 条目（[relay_task.go:290](../relay/relay_task.go#L290)），
+新增 `RelayModeMuleRouterFetchByID` 与 `fetchRespBuilders` 条目（[relay_task.go:290](../../relay/relay_task.go#L290)），
 输出上游原生形状：
 
 - `task_info.id` **必须替换为 new-api 的公开 task ID**，不能泄露上游 UUID；
@@ -303,18 +303,18 @@ alibaba 等 vendor 提供 `DELETE .../{task_id}`，但**本期三个 carrothub s
 
 ### 6.1 轮询由服务端定时发起，与客户端无关
 
-调度在 [system_task_handlers.go:138-153](../controller/system_task_handlers.go#L138-L153)：
+调度在 [system_task_handlers.go:138-153](../../controller/system_task_handlers.go#L138-L153)：
 `async_task_poll` 系统任务，**间隔 15 秒**。`Enabled()` 同时要求 `constant.UpdateTask` 开启
 且 `model.HasUnfinishedSyncTasks()` 为真——**没有未完成任务就不排期**，空闲时零开销，
 不存在"无脑不停轮询"。
 
-每轮 [`RunTaskPollingOnce`](../service/task_polling.go#L108)：
+每轮 [`RunTaskPollingOnce`](../../service/task_polling.go#L108)：
 
 1. `sweepTimedOutTasks` 先清超时任务（`TASK_TIMEOUT_MINUTES`，默认 1440 = 24 小时），
    置 FAILURE 并退款，每轮最多 100 条，剩余下轮继续；
 2. 取未完成任务（`TASK_QUERY_LIMIT`，默认 1000），按 platform → channel 分组；
 3. **每个渠道一个 goroutine 并发，渠道内串行且任务间 sleep 1 秒**
-   （[task_polling.go:418-435](../service/task_polling.go#L418-L435)），避免打爆单个上游；
+   （[task_polling.go:418-435](../../service/task_polling.go#L418-L435)），避免打爆单个上游；
    渠道设置 `DisableTaskPollingSleep` 可关闭该间隔。
 
 分布式安全性已由框架保证：系统任务持 lease + runnerID，任务终态更新走 CAS
@@ -324,15 +324,15 @@ alibaba 等 vendor 提供 `DELETE .../{task_id}`，但**本期三个 carrothub s
 
 | 时点 | 动作 | 位置 |
 |---|---|---|
-| 提交 | 算基础价 → `EstimateBilling` 倍率 → `PreConsumeBilling` **预扣** → 发上游 → `AdjustBillingOnSubmit` 调差额 | [relay_task.go:180-250](../relay/relay_task.go#L180-L250) |
-| 成功 | `PerCallBilling` 直接跳过；否则 `AdjustBillingOnComplete` 补/退，再回退到 token 重算，都没有则保持预扣额 | [`settleTaskBillingOnComplete`](../service/task_polling.go#L643) |
-| 失败 | `RefundTaskQuota` 全额退，退完 `task.Quota = 0` 落库防重复退 | [task_billing.go:166-204](../service/task_billing.go#L166-L204) |
+| 提交 | 算基础价 → `EstimateBilling` 倍率 → `PreConsumeBilling` **预扣** → 发上游 → `AdjustBillingOnSubmit` 调差额 | [relay_task.go:180-250](../../relay/relay_task.go#L180-L250) |
+| 成功 | `PerCallBilling` 直接跳过；否则 `AdjustBillingOnComplete` 补/退，再回退到 token 重算，都没有则保持预扣额 | [`settleTaskBillingOnComplete`](../../service/task_polling.go#L643) |
+| 失败 | `RefundTaskQuota` 全额退，退完 `task.Quota = 0` 落库防重复退 | [task_billing.go:166-204](../../service/task_billing.go#L166-L204) |
 | 超时 | 同失败路径退款（`TaskRefundLegacyCutoff` 之前的旧任务明确不退） | `sweepTimedOutTasks` |
 
 ### 6.3 客户端 fetch 只读本地任务表
 
 `RelayTaskFetch` 走 `model.GetByTaskId` 读库，**不打上游、不参与计费**。
-唯一例外是 Gemini/Vertex 的 `tryRealtimeFetch`（[relay_task.go:430](../relay/relay_task.go#L430)），
+唯一例外是 Gemini/Vertex 的 `tryRealtimeFetch`（[relay_task.go:430](../../relay/relay_task.go#L430)），
 用户查询时实时拉上游状态——但那也只是读，计费仍归轮询。
 
 **结论：用户不来取结果，任务照样会被轮到终态、照样结算或退款。**
@@ -347,7 +347,7 @@ alibaba 等 vendor 提供 `DELETE .../{task_id}`，但**本期三个 carrothub s
 - **24 小时超时自动退款**（上游卡死不会永久占用用户额度）；
 - 轮询频率、并发、限流间隔、CAS 防重全部继承，适配器里一行计费循环代码都不用写。
 
-需要注意的两处：**上游 429 会被识别为限流而非失败**（[task_polling.go:500-520](../service/task_polling.go#L500-L520)），
+需要注意的两处：**上游 429 会被识别为限流而非失败**（[task_polling.go:500-520](../../service/task_polling.go#L500-L520)），
 保持原状态等下一轮，不会误退款；而 `ParseTaskResult` 返回未知状态会让该任务**每轮报错但不推进**，
 所以 5.4 里对未知 status 返回 error 的做法要配合监控，避免任务悄悄卡到 24 小时超时才失败。
 
@@ -365,7 +365,7 @@ alibaba 等 vendor 提供 `DELETE .../{task_id}`，但**本期三个 carrothub s
 `/v1/video/generations` 分支），所以渠道分流逻辑零改动。
 
 价格查找同样安全：`GetModelRatio` / `GetModelPrice` 是**精确查表**
-（[model_ratio.go:396-410](../setting/ratio_setting/model_ratio.go#L396-L410)），
+（[model_ratio.go:396-410](../../setting/ratio_setting/model_ratio.go#L396-L410)），
 `FormatMatchingModelName` 的特判只针对 `gemini-2.5-*` / `gpt-4*-gizmo` 前缀，
 唯一通配是 `:compact` 后缀。`carrothub/z-image-spicy/generation` 这种带 `/` 的名字
 （openrouter 风格）撞不上任何既有规则，价格表只增不改。
@@ -375,7 +375,7 @@ alibaba 等 vendor 提供 `DELETE .../{task_id}`，但**本期三个 carrothub s
 这是唯一能间接影响其他模型计费的路径：
 
 - `GetAllUnFinishSyncTasks(TASK_QUERY_LIMIT)` 默认只取 **1000 条**，按 `id` 升序，
-  **所有平台共用这一个池**（[task.go:311-320](../model/task.go#L311-L320)）；
+  **所有平台共用这一个池**（[task.go:311-320](../../model/task.go#L311-L320)）；
 - 外层 `for platform, tasks := range platformTask` 是**串行**的，只有渠道内并发；
   渠道内每个任务之间还 sleep 1 秒。
 
@@ -392,7 +392,7 @@ MuleRouter 任务量一大会同时造成：(a) 占满 1000 的取数配额，�
 ### 7.3 两条非计费副作用
 
 1. **`ChannelTypeDummy` 会跟着变成 64**——那个 const 块没有 `iota`，`ChannelTypeDummy`
-   复用上一行字面值。它被 [controller/model.go:97](../controller/model.go#L97) 用作循环上界
+   复用上一行字面值。它被 [controller/model.go:97](../../controller/model.go#L97) 用作循环上界
    构建 `channelId2Models`。只影响 `/v1/models` 的展示，但需确认
    `ChannelType2APIType(64)` 返回 `false` 从而被跳过，否则会用默认 adaptor 的模型列表污染列表。
 2. **`/vendors` 路由组不与现有路由冲突**——根级已有 `/:mode/mj` 参数路由与 `/v1`、`/mj`、
@@ -443,7 +443,7 @@ MuleRouter 任务量一大会同时造成：(a) 占满 1000 的取数配额，�
 | `wan2.2-i2v-spicy` | 480p $0.02 / second；720p $0.04 / second；prompt rewriting $0.001 / request |
 
 `model_price` 的单位就是美元（`quota = model_price × QuotaPerUnit × groupRatio`，
-[price.go:216-221](../relay/helper/price.go#L216-L221)），下表数字可直接录入，实际售价再叠加加价倍率：
+[price.go:216-221](../../relay/helper/price.go#L216-L221)），下表数字可直接录入，实际售价再叠加加价倍率：
 
 | 内部模型名 | 基准档 | `model_price` | `billing_vars` |
 |---|---|---|---|
