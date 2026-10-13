@@ -9,7 +9,7 @@ description: Run real paid API calls against a deployed new-api instance to veri
 
 ## 为什么需要真跑
 
-Seedance 2.0 是按 token 后付费的：提交任务时只预扣一个小额占位（`模型倍率 ÷ 2 × QuotaPerUnit × 分组倍率`），任务成功后才用上游返回的 usage 做差额结算。这意味着计费逻辑里最容易出错的部分（用哪个 token 字段、分辨率倍率有没有生效、差额结算有没有触发）全都发生在异步轮询阶段，读代码只能推断，必须真跑一次才能确认。
+Seedance 2.0 是按 token 后付费的：提交任务时先预扣一笔估算额度，任务成功后才用上游返回的 usage 做差额结算。Seedance 现在由 doubao 任务插件（`plugins/tasks/doubao/plugin.js`）处理，预扣和结算用量都由插件给出。这意味着计费逻辑里最容易出错的部分（用哪个 token 字段、分辨率倍率有没有生效、差额结算有没有触发）全都发生在异步轮询阶段，读代码只能推断，必须真跑一次才能确认。
 
 代价是真花钱。官方单价下 5 秒视频约为：480p ¥2.3、720p ¥5.0、1080p ¥12.4、4K ¥25.3。所以脚本默认要求显式确认才会花钱，且优先跑最便宜的档位。
 
@@ -21,7 +21,7 @@ Seedance 2.0 是按 token 后付费的：提交任务时只预扣一个小额占
 |---|---|---|---|
 | `NEW_API_BASE_URL` | `--base-url` | 实例地址，例如 `https://api.example.com` | 部署地址，不要带尾斜杠 |
 | `NEW_API_KEY` | `--api-key` | 中转 API key（`sk-` 开头），用来调 `/v1/video/generations` | 后台「令牌」页面新建 |
-| `NEW_API_ADMIN_TOKEN` | `--admin-token` | 管理员访问令牌（PAT），用来读 `/api/task/`、`/api/log/`、`/api/pricing` | 后台「个人设置 → 访问令牌」 |
+| `NEW_API_ADMIN_TOKEN` | `--admin-token` | 管理员访问令牌（PAT），用来读 `/api/task`、`/api/log/`、`/api/pricing` | 后台「个人设置 → 访问令牌」 |
 
 可选：
 
@@ -97,7 +97,7 @@ python3 .claude/skills/seedance-billing-check/scripts/seedance_billing_check.py 
 3. **本轮花费**，以及余额变化是否对得上。
 4. **哪些档位没测**，明确说出来。没跑的档位不能算验证通过 — 尤其 4K 和 fast 型号默认不在标准集里。
 
-如果全部通过，直接说通过，不要为了显得严谨而制造疑虑。如果 `token_field` 失败，那就是实锤的系统性超收，值得单独强调并给出修复位置（`relay/channel/task/doubao/adaptor.go` 的 `ParseTaskResult` 里把 `TaskInfo.TotalTokens` 改成 `Usage.CompletionTokens`；不要动 `service/task_billing.go` 的 `RecalculateTaskQuotaByTokens`，它是所有 task adaptor 共用的通用结算路径）。
+如果全部通过，直接说通过，不要为了显得严谨而制造疑虑。如果 `token_field` 失败，那就是实锤的系统性超收，值得单独强调并给出修复位置（`plugins/tasks/doubao/plugin.js` 的 `extractUsageOnComplete`，它应优先取 `usage.completion_tokens`；不要动 `service/task_billing.go` 的 `RecalculateTaskQuotaByTokens`，它是所有任务渠道共用的通用结算路径）。如果断言说明里写着「两者相等，区分不出」，说明这一档上游返回的 `completion_tokens` 和 `total_tokens` 相同，`token_field` 通过不能证明口径正确，汇报时要说明。
 
 ## 排障
 
@@ -108,6 +108,14 @@ python3 .claude/skills/seedance-billing-check/scripts/seedance_billing_check.py 
 **任务一直 `queued` 到超时** — 上游排队或渠道 key 无效。看管理端任务详情的 `fail_reason`，以及后端日志。这种情况不会扣钱（失败会退款），但要在报告里标为未验证而不是失败。
 
 **任务成功但等不到差额结算** — 脚本会等到 `--settle-timeout`（默认 180 秒）。等不到有三种可能，按可能性排序：上游没返回 usage（则扣费停留在预扣的几分钱，这本身是个严重问题，要在报告里明确指出）；模型被配成了固定价格（预检应该已经拦住）；后台的任务轮询间隔太长。区分方法是看报告里的 `upstream_usage` 字段是否为空。
+
+脚本从哪里取数据（实例升级后数据位置变了，断言变成「数据不足」时先查这里）：
+
+- 上游原始 usage：中转查询接口 `GET /v1/video/generations/{id}` 返回体的 `data.data.usage`。管理端任务详情 `/api/task` 不再返回上游任务体。
+- 计费 token：结算日志的 `completion_tokens`。
+- 视频输入折扣：结算日志 `other.video_input_ratio`（旧版 Go adaptor 是 `other.video_input`）。
+
+**想测 `duration: -1`（时长由模型决定）** — 只能走 `POST /v1/videos`（`seconds: "-1"`）。`/v1/video/generations` 会在进入插件之前被通用时长校验拒绝，返回 400 `invalid_seconds`，不扣钱。脚本目前不覆盖这个用例，需要手工提交后按任务 ID 核对预扣和结算。
 
 **含视频输入档位报上游拉不到视频** — 上一档产出的 URL 可能是本站代理地址而非上游 CDN 地址，或者已过期。这时改用 `SEEDANCE_TEST_VIDEO_URL` 提供一个稳定的公网 mp4。
 
