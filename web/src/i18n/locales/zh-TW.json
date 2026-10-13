@@ -2446,7 +2446,7 @@
     "Expires in": "剩餘到期時間",
     "Export": "匯出",
     "Export logs": "匯出日誌",
-    "Export CSV": "匯出 CSV",
+    "Export statement": "匯出對帳單",
     "Export snapshot": "匯出快照",
     "Exported {{count}} logs": "已匯出 {{count}} 筆日誌",
     "Expose ratio API": "暴露倍率接口",

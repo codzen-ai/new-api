@@ -2446,7 +2446,7 @@
     "Expires in": "Còn lại",
     "Export": "Xuất",
     "Export logs": "Xuất nhật ký",
-    "Export CSV": "Xuất CSV",
+    "Export statement": "Xuất bảng đối soát",
     "Export snapshot": "Xuất bản chụp",
     "Exported {{count}} logs": "Đã xuất {{count}} bản ghi nhật ký",
     "Expose ratio API": "Cung cấp API tỷ lệ",

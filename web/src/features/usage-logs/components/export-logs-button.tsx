@@ -87,14 +87,14 @@ export function ExportLogsButton<TData>(props: { table: Table<TData> }) {
             size='icon'
             onClick={() => exportLogs()}
             disabled={isPending}
-            aria-label={t('Export CSV')}
+            aria-label={t('Export statement')}
             className='text-muted-foreground hover:text-foreground size-7'
           />
         }
       >
         {isPending ? <Loader2 className='animate-spin' /> : <Download />}
       </TooltipTrigger>
-      <TooltipContent>{t('Export CSV')}</TooltipContent>
+      <TooltipContent>{t('Export statement')}</TooltipContent>
     </Tooltip>
   )
 }

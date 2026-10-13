@@ -2446,7 +2446,7 @@
     "Expires in": "期限まで",
     "Export": "エクスポート",
     "Export logs": "ログをエクスポート",
-    "Export CSV": "CSV をエクスポート",
+    "Export statement": "明細書をエクスポート",
     "Export snapshot": "スナップショットを出力",
     "Exported {{count}} logs": "{{count}} 件のログをエクスポートしました",
     "Expose ratio API": "倍率APIを公開",

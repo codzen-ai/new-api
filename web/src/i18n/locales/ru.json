@@ -2446,7 +2446,7 @@
     "Expires in": "До истечения",
     "Export": "Экспорт",
     "Export logs": "Экспорт журналов",
-    "Export CSV": "Экспорт CSV",
+    "Export statement": "Экспорт выписки",
     "Export snapshot": "Экспорт снимка",
     "Exported {{count}} logs": "Экспортировано записей: {{count}}",
     "Expose ratio API": "Интерфейс экспонирования коэффициента",
