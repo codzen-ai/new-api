@@ -595,47 +595,20 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 	return logs, total, err
 }
 
-// buildLogExportQuery constructs the shared WHERE conditions for log export queries.
+// statementLogQuery is filter restricted to logTypes instead of filter.Type: a
+// statement exported by consume rows also carries the refunds that offset them.
 // An empty logTypes matches every type, mirroring the "all" filter in the UI.
-func buildLogExportQuery(logTypes []int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string) (*gorm.DB, error) {
-	var tx *gorm.DB
+func statementLogQuery(filter LogFilter, logTypes []int) (*gorm.DB, error) {
+	filter.Type = LogTypeUnknown
+	tx := LOG_DB
 	switch len(logTypes) {
 	case 0:
-		tx = LOG_DB
 	case 1:
-		tx = LOG_DB.Where("logs.type = ?", logTypes[0])
+		tx = tx.Where("logs.type = ?", logTypes[0])
 	default:
-		tx = LOG_DB.Where("logs.type IN ?", logTypes)
+		tx = tx.Where("logs.type IN ?", logTypes)
 	}
-	var err error
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
-		return nil, err
-	}
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.username", username); err != nil {
-		return nil, err
-	}
-	if tokenName != "" {
-		tx = tx.Where("logs.token_name = ?", tokenName)
-	}
-	if requestId != "" {
-		tx = tx.Where("logs.request_id = ?", requestId)
-	}
-	if upstreamRequestId != "" {
-		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
-	}
-	if startTimestamp != 0 {
-		tx = tx.Where("logs.created_at >= ?", startTimestamp)
-	}
-	if endTimestamp != 0 {
-		tx = tx.Where("logs.created_at <= ?", endTimestamp)
-	}
-	if channel != 0 {
-		tx = tx.Where("logs.channel_id = ?", channel)
-	}
-	if group != "" {
-		tx = tx.Where("logs."+logGroupCol+" = ?", group)
-	}
-	return tx, nil
+	return filter.apply(tx)
 }
 
 // fillLogsChannelName populates the ChannelName field for a slice of logs.
@@ -677,8 +650,8 @@ func fillLogsChannelName(logs []*Log) {
 }
 
 // CountAllLogsForExport returns the total number of logs matching the given filters.
-func CountAllLogsForExport(logTypes []int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string) (int64, error) {
-	tx, err := buildLogExportQuery(logTypes, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
+func CountAllLogsForExport(filter LogFilter, logTypes []int) (int64, error) {
+	tx, err := statementLogQuery(filter, logTypes)
 	if err != nil {
 		return 0, err
 	}
@@ -689,11 +662,11 @@ func CountAllLogsForExport(logTypes []int, startTimestamp, endTimestamp int64, m
 
 // StreamAllLogsForExport iterates over all matching logs in cursor-based batches
 // and calls handler for each batch. Stops early if handler returns an error.
-func StreamAllLogsForExport(logTypes []int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group, requestId, upstreamRequestId string, batchSize int, handler func([]*Log) error) error {
+func StreamAllLogsForExport(filter LogFilter, logTypes []int, batchSize int, handler func([]*Log) error) error {
 	lastId := 0 // 0 means no cursor yet (we use id > 0 for the very first batch)
 	for {
 		var batch []*Log
-		tx, err := buildLogExportQuery(logTypes, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
+		tx, err := statementLogQuery(filter, logTypes)
 		if err != nil {
 			return err
 		}
