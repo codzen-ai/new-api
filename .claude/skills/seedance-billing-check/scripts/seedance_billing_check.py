@@ -310,7 +310,8 @@ def poll_video(client, task_id, timeout, interval=10):
 
 
 def admin_task(client, task_id):
-    page = client.admin_get("/api/task/", {"task_id": task_id, "page_size": 10})
+    # 管理端任务列表的路由是 /api/task，带结尾斜杠会先被 301 重定向一次
+    page = client.admin_get("/api/task", {"task_id": task_id, "page_size": 10})
     items = (page or {}).get("items") or []
     return next((t for t in items if t.get("task_id") == task_id), None)
 
@@ -385,18 +386,21 @@ def run_case(client, model, case, seconds, ctx, video_url, poll_timeout, settle_
     task = admin_task(client, task_id)
     result["task_quota"] = (task or {}).get("quota")
 
-    upstream = {}
-    if task and task.get("data"):
+    # 上游原始任务体（含 usage）只出现在中转查询接口的 data 里；管理端任务详情
+    # 不再返回它。老实例仍从管理端取，作为兜底。
+    data = video.get("data")
+    if not isinstance(data, dict) and task and task.get("data"):
         data = task["data"]
         if isinstance(data, str):
             try:
                 data = json.loads(data)
             except json.JSONDecodeError:
                 data = {}
-        upstream = (data or {}).get("usage") or {}
-        result["upstream_resolution"] = (data or {}).get("resolution")
-        result["upstream_duration"] = (data or {}).get("duration")
-        result["upstream_fps"] = (data or {}).get("framespersecond")
+    data = data if isinstance(data, dict) else {}
+    upstream = data.get("usage") or {}
+    result["upstream_resolution"] = data.get("resolution")
+    result["upstream_duration"] = data.get("duration")
+    result["upstream_fps"] = data.get("framespersecond")
     result["upstream_usage"] = upstream
 
     settlement = None
@@ -416,10 +420,16 @@ def run_case(client, model, case, seconds, ctx, video_url, poll_timeout, settle_
             "actual_quota": other.get("actual_quota"),
             "model_ratio": other.get("model_ratio"),
             "group_ratio": other.get("group_ratio"),
-            "video_input": other.get("video_input"),
+            # 任务插件把视频输入折扣记为 video_input_ratio；老版本 Go adaptor 记为 video_input
+            "video_input": other.get("video_input_ratio", other.get("video_input")),
         }
-        match = re.search(r"tokens=(\d+)", settlement.get("content") or "")
-        result["billed_tokens"] = int(match.group(1)) if match else None
+        # 结算日志的 completion_tokens 就是计费用量；老版本只写在 content 里（tokens=N），
+        # 新版 content 是 "tokens N"
+        billed = settlement.get("completion_tokens") or None
+        if billed is None:
+            match = re.search(r"tokens[= ](\d+)", settlement.get("content") or "")
+            billed = int(match.group(1)) if match else None
+        result["billed_tokens"] = billed
     else:
         result["settlement"] = None
         result["billed_tokens"] = None
@@ -459,6 +469,8 @@ def verify_case(result, case, ctx, seconds):
     else:
         passed = billed == completion
         detail = f"计费用 {billed}，上游 completion_tokens={completion}，total_tokens={total}"
+        if passed and total == completion:
+            detail += "（两者相等，本档位区分不出实例用的是哪个字段）"
         if not passed and total is not None and billed == total:
             over = (total - completion) / completion * 100 if completion else float("inf")
             detail += f" → 实例用的是 total_tokens，相对官方口径超收 {over:.1f}%"
@@ -467,7 +479,7 @@ def verify_case(result, case, ctx, seconds):
     # 2. 分辨率 / 视频输入倍率
     actual_ratio = settlement.get("video_input")
     if abs(expected_ratio - 1.0) < 1e-9:
-        passed = actual_ratio is None
+        passed = actual_ratio is None or abs(float(actual_ratio) - 1.0) < 1e-9
         detail = f"基准档应无 video_input 倍率，实际 {actual_ratio}"
     elif actual_ratio is None:
         passed = False
