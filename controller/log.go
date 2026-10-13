@@ -828,16 +828,8 @@ func logToCSVRow(l *model.Log, currency string, rate decimal.Decimal) []string {
 // ExportLogStatement streams the customer reconciliation statement as CSV. It is
 // separate from ExportAllLogs, which exports the log table as the console shows it.
 func ExportLogStatement(c *gin.Context) {
-	logType, _ := strconv.Atoi(c.Query("type"))
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
-	username := c.Query("username")
-	tokenName := c.Query("token_name")
-	modelName := c.Query("model_name")
-	channel, _ := strconv.Atoi(c.Query("channel"))
-	group := c.Query("group")
-	requestId := c.Query("request_id")
-	upstreamRequestId := c.Query("upstream_request_id")
+	filter := logFilterFromQuery(c, true)
+	logType := filter.Type
 
 	// A statement has to be net. An asynchronous task charges an estimate when it
 	// is submitted and settles the difference minutes later, so consume rows on
@@ -854,7 +846,7 @@ func ExportLogStatement(c *gin.Context) {
 		logTypes = []int{model.LogTypeConsume, model.LogTypeRefund}
 	}
 
-	total, err := model.CountAllLogsForExport(logTypes, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId)
+	total, err := model.CountAllLogsForExport(filter, logTypes)
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
 		return
@@ -884,9 +876,7 @@ func ExportLogStatement(c *gin.Context) {
 	currency, rate := exportCurrency()
 
 	err = model.StreamAllLogsForExport(
-		logTypes, startTimestamp, endTimestamp,
-		modelName, username, tokenName,
-		channel, group, requestId, upstreamRequestId,
+		filter, logTypes,
 		1000,
 		func(logs []*model.Log) error {
 			for _, l := range logs {
