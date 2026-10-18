@@ -41,6 +41,16 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 - Usage: `useTranslation()` hook, call `t('English key')` in components
 - CLI tools: `bun run i18n:sync` (from `web/`)
 
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues in `codzen-ai/new-api` (never upstream `QuantumNous/new-api`), via `gh`: a spec is an issue labelled `spec`, its tickets are its sub-issues linked by native `blocked by` dependencies. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
 ## Rules
 
 ### Common Code Quality
