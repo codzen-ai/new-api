@@ -4,8 +4,6 @@ Specs and tickets for this repo live as GitHub issues in `codzen-ai/new-api`. Us
 
 **Always pass `--repo codzen-ai/new-api`** (`gh api repos/codzen-ai/new-api/...` for API calls). This repo is a fork of `QuantumNous/new-api`, and `gh` must never create or edit anything upstream. The Linear server in `.mcp.json` (`linear-codzen`) is not the tracker for specs and tickets.
 
-Specs and tickets are internal work items, not user reports: the issue-reporting rules in `AGENTS.md` (`.agents/github/ISSUE.md`) do not apply to them.
-
 **Specs and tickets are both issues, told apart by structure:**
 
 - A **spec** is an issue labelled `spec`, with the spec text as its body. Its body ends with a pointer to the repo docs (`AGENTS.md`, and `.agents/rules/` where relevant).
