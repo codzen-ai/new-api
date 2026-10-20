@@ -77,8 +77,13 @@ func muleRouterSettings(routes string) string {
 func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 	db := useMuleRouterMigrationPostgres(t)
 	const defaultBaseURL = "https://api.mulerouter.ai"
+	// The migration writes the Go MuleRouter channel type's default address;
+	// a plugin channel bound by an administrator gets the plugin's meta.baseUrl
+	// instead. The two live in different modules and must stay the same
+	// address, so a moved channel and a newly bound one reach the same vendor.
 	plugin, found := jsplugin.DefaultRegistry.Generation().Get(muleRouterPluginKey)
 	require.True(t, found)
+	require.Equal(t, defaultBaseURL, constant.GetChannelBaseURL(constant.ChannelTypeMuleRouter))
 	require.Equal(t, defaultBaseURL, plugin.Meta.BaseURL)
 
 	setting := `{"proxy":"http://proxy:8080","http_protocol":"http1"}`
@@ -142,7 +147,7 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 	}
 	require.NoError(t, db.Create(channels).Error)
 	// Channel 2 stores an empty Base URL; channel 10 has none at all.
-	require.NoError(t, db.Exec("UPDATE channels SET base_url = NULL WHERE id = 10").Error)
+	require.NoError(t, db.Model(&Channel{}).Where("id = ?", 10).Update("base_url", nil).Error)
 	before := map[int]Channel{}
 	for _, channel := range channels {
 		var row Channel
