@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	// Registers the built-in task plugins, so the migration checks channels
 	// against the endpoint table the mulerouter plugin actually loads.
 	_ "github.com/QuantumNous/new-api/plugins"
@@ -68,13 +69,28 @@ func muleRouterSettings(routes string) string {
 // legacy type-61 channel still carrying its route table, an upstream Task
 // Plugin channel (type 61, no route table), channels whose route tables the
 // plugin cannot serve at the same price, and tasks of each.
+//
+// A Go MuleRouter channel may leave its Base URL empty, because the Go adaptor
+// falls back to the channel type's default address. A plugin channel sends
+// requests to the address on the channel, so a moved channel without one gets
+// that default, which is also the plugin's own default.
 func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 	db := useMuleRouterMigrationPostgres(t)
+	const defaultBaseURL = "https://api.mulerouter.ai"
+	// The migration writes the Go MuleRouter channel type's default address;
+	// a plugin channel bound by an administrator gets the plugin's meta.baseUrl
+	// instead. The two live in different modules and must stay the same
+	// address, so a moved channel and a newly bound one reach the same vendor.
+	plugin, found := jsplugin.DefaultRegistry.Generation().Get(muleRouterPluginKey)
+	require.True(t, found)
+	require.Equal(t, defaultBaseURL, constant.GetChannelBaseURL(constant.ChannelTypeMuleRouter))
+	require.Equal(t, defaultBaseURL, plugin.Meta.BaseURL)
 
 	setting := `{"proxy":"http://proxy:8080","http_protocol":"http1"}`
 	mapping := `{"z-image-spicy":"carrothub/z-image-spicy/generation"}`
 	weight, priority := uint(7), int64(3)
-	baseURL := "https://api.mulerouter.ai"
+	baseURL := "https://mulerouter.example.com"
+	blankBaseURL := "  "
 	soraSetting := `{"task_plugin_key":"sora"}`
 	undeclared := `{"routes":[
 		{"vendor":"carrothub","model":"qwen-image-edit-spicy"},
@@ -107,6 +123,7 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 			Weight: &weight, Priority: &priority, Setting: &setting, OtherSettings: muleRouterSettings(muleRouterStagingRoutes),
 		},
 		{Id: 2, Type: constant.ChannelTypeTaskPlugin, Name: "legacy mulerouter", Key: "sk-legacy", OtherSettings: `{"mulerouter":` + muleRouterStagingRoutes + `}`},
+		{Id: 11, Type: constant.ChannelTypeMuleRouter, Name: "blank base URL", Key: "sk-11", BaseURL: &blankBaseURL, OtherSettings: muleRouterSettings(muleRouterStagingRoutes)},
 		{Id: 3, Type: constant.ChannelTypeTaskPlugin, Name: "sora", Key: "sk-sora", Setting: &soraSetting, OtherSettings: `{}`},
 		{Id: 4, Type: constant.ChannelTypeMuleRouter, Name: "undeclared endpoint", Key: "sk-4", OtherSettings: muleRouterSettings(undeclared)},
 		{Id: 5, Type: constant.ChannelTypeMuleRouter, Name: "repriced endpoint", Key: "sk-5", OtherSettings: muleRouterSettings(repriced)},
@@ -129,6 +146,8 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		},
 	}
 	require.NoError(t, db.Create(channels).Error)
+	// Channel 2 stores an empty Base URL; channel 10 has none at all.
+	require.NoError(t, db.Model(&Channel{}).Where("id = ?", 10).Update("base_url", nil).Error)
 	before := map[int]Channel{}
 	for _, channel := range channels {
 		var row Channel
@@ -149,6 +168,7 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		{TaskID: "task_legacy_outside_route_table", ChannelId: 8, Platform: "61", Status: TaskStatusInProgress},
 		{TaskID: "task_suffixed_model", ChannelId: 9, Platform: "64", Status: TaskStatusInProgress},
 		{TaskID: "task_harmless_mapping", ChannelId: 10, Platform: "64", Status: TaskStatusInProgress},
+		{TaskID: "task_blank_base_url", ChannelId: 11, Platform: "64", Status: TaskStatusInProgress},
 	}
 	require.NoError(t, db.Create(tasks).Error)
 
@@ -156,20 +176,27 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		Type          int
 		Setting       string
 		OtherSettings string
+		// BaseURL is the stored Base URL; nil means NULL.
+		BaseURL *string
 	}
+	empty, defaultURL := "", defaultBaseURL
 	movedSettings := `{"disable_task_polling_sleep":true}`
 	expectedChannels := map[int]channelState{
-		1: {constant.ChannelTypeTaskPlugin, `{"proxy":"http://proxy:8080","http_protocol":"http1","task_plugin_key":"mulerouter"}`, movedSettings},
-		2: {constant.ChannelTypeTaskPlugin, `{"task_plugin_key":"mulerouter"}`, `{}`},
-		3: {constant.ChannelTypeTaskPlugin, soraSetting, `{}`},
-		4: {constant.ChannelTypeMuleRouter, "", muleRouterSettings(undeclared)},
-		5: {constant.ChannelTypeMuleRouter, "", muleRouterSettings(repriced)},
+		// A Base URL of its own is kept.
+		1: {constant.ChannelTypeTaskPlugin, `{"proxy":"http://proxy:8080","http_protocol":"http1","task_plugin_key":"mulerouter"}`, movedSettings, &baseURL},
+		2: {constant.ChannelTypeTaskPlugin, `{"task_plugin_key":"mulerouter"}`, `{}`, &defaultURL},
+		// Not a MuleRouter channel: its empty Base URL stays empty.
+		3: {constant.ChannelTypeTaskPlugin, soraSetting, `{}`, &empty},
+		// Channels that stay on the Go adaptor keep their empty Base URL.
+		4: {constant.ChannelTypeMuleRouter, "", muleRouterSettings(undeclared), &empty},
+		5: {constant.ChannelTypeMuleRouter, "", muleRouterSettings(repriced), &empty},
 		// The plugin cannot serve it, so it goes where the Go adaptor serves it.
-		6:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(repriced)},
-		7:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(zImageOnly)},
-		8:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(zImageOnly)},
-		9:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(zImageOnly)},
-		10: {constant.ChannelTypeTaskPlugin, `{"task_plugin_key":"mulerouter"}`, movedSettings},
+		6:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(repriced), &empty},
+		7:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(zImageOnly), &empty},
+		8:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(zImageOnly), &empty},
+		9:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(zImageOnly), &empty},
+		10: {constant.ChannelTypeTaskPlugin, `{"task_plugin_key":"mulerouter"}`, movedSettings, &defaultURL},
+		11: {constant.ChannelTypeTaskPlugin, `{"task_plugin_key":"mulerouter"}`, movedSettings, &defaultURL},
 	}
 	expectedPlatforms := map[string]constant.TaskPlatform{
 		"task_go_in_flight":               muleRouterPluginKey,
@@ -185,6 +212,7 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		"task_legacy_outside_route_table": "64",
 		"task_suffixed_model":             "64",
 		"task_harmless_mapping":           muleRouterPluginKey,
+		"task_blank_base_url":             muleRouterPluginKey,
 	}
 
 	for run := 1; run <= 2; run++ {
@@ -201,8 +229,9 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 				assert.JSONEq(t, expected.Setting, *row.Setting, "run %d channel %d", run, id)
 			}
 			assert.JSONEq(t, expected.OtherSettings, row.OtherSettings, "run %d channel %d", run, id)
+			assert.Equal(t, expected.BaseURL, row.BaseURL, "run %d channel %d base URL", run, id)
 			unchanged := before[id]
-			unchanged.Type, unchanged.Setting, unchanged.OtherSettings = row.Type, row.Setting, row.OtherSettings
+			unchanged.Type, unchanged.Setting, unchanged.OtherSettings, unchanged.BaseURL = row.Type, row.Setting, row.OtherSettings, row.BaseURL
 			assert.Equal(t, unchanged, row, "run %d channel %d keeps every other field", run, id)
 		}
 		for taskID, platform := range expectedPlatforms {

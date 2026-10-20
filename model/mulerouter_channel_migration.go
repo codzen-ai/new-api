@@ -39,8 +39,10 @@ var (
 // 64, or a legacy type 61 carrying a MuleRouter route table) onto the
 // mulerouter task plugin: the channel becomes a type-61 Task Plugin channel
 // bound to the plugin, its route table is removed, and its tasks are handed to
-// the plugin, all in one transaction per channel. No other channel field
-// changes.
+// the plugin, all in one transaction per channel. A channel without a Base URL
+// gets the address the Go adaptor used for it, the MuleRouter channel type's
+// default, because a plugin channel sends requests only to the address stored
+// on the channel. No other channel field changes.
 //
 // A channel moves only when every MuleRouter endpoint in its route table is
 // declared by the plugin with exactly the same billing fields, judged against
@@ -52,7 +54,7 @@ var (
 // node only, before the channel cache loads.
 func MigrateMuleRouterChannelsToTaskPlugin() error {
 	var channels []Channel
-	if err := DB.Select("id", "type", "models", "model_mapping", "setting", "settings").
+	if err := DB.Select("id", "type", "base_url", "models", "model_mapping", "setting", "settings").
 		Where("type IN ?", []int{constant.ChannelTypeMuleRouter, constant.ChannelTypeTaskPlugin}).
 		Order("id").Find(&channels).Error; err != nil {
 		return err
@@ -230,8 +232,8 @@ func muleRouterEndpointsOutsideRouteTable(channel *Channel, config *dto.MuleRout
 }
 
 // moveMuleRouterChannelToTaskPlugin binds the channel to the mulerouter
-// plugin, drops its route table and hands its tasks to the plugin, returning
-// the number of tasks moved.
+// plugin, drops its route table, fills in an empty Base URL and hands its tasks
+// to the plugin, returning the number of tasks moved.
 func moveMuleRouterChannelToTaskPlugin(channel *Channel) (int64, error) {
 	setting := map[string]json.RawMessage{}
 	if channel.Setting != nil && strings.TrimSpace(*channel.Setting) != "" {
@@ -254,13 +256,19 @@ func moveMuleRouterChannelToTaskPlugin(channel *Channel) (int64, error) {
 		return 0, err
 	}
 
+	updates := map[string]any{
+		"type":     constant.ChannelTypeTaskPlugin,
+		"setting":  string(encodedSetting),
+		"settings": string(encodedOtherSettings),
+	}
+	// The mulerouter plugin declares the same address as its baseUrl.
+	if channel.BaseURL == nil || strings.TrimSpace(*channel.BaseURL) == "" {
+		updates["base_url"] = constant.GetChannelBaseURL(constant.ChannelTypeMuleRouter)
+	}
+
 	var movedTasks int64
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&Channel{}).Where("id = ? AND type = ?", channel.Id, channel.Type).Updates(map[string]any{
-			"type":     constant.ChannelTypeTaskPlugin,
-			"setting":  string(encodedSetting),
-			"settings": string(encodedOtherSettings),
-		})
+		result := tx.Model(&Channel{}).Where("id = ? AND type = ?", channel.Id, channel.Type).Updates(updates)
 		if result.Error != nil {
 			return result.Error
 		}
