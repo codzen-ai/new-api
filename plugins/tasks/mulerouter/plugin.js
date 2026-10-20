@@ -9,6 +9,9 @@
 // - enum: the stringified value looks up its multiplier in values.
 // - default (a string) bills an omitted or null field; source names the request
 //   field when it differs from the multiplier name.
+// - required refuses an omitted or null field instead of billing a default. It
+//   is the one departure from billing_vars, for an int field with an enum whose
+//   top-level value the host may have dropped.
 const ENDPOINTS = {
   "carrothub/z-image-spicy/generation": {
     billing: [
@@ -16,6 +19,20 @@ const ENDPOINTS = {
       { name: "prompt_extend", kind: "enum", values: { true: 1.076923, false: 1 }, default: "true" },
       { name: "width", kind: "int", min: 256, max: 1536, default: "1024" },
       { name: "height", kind: "int", min: 256, max: 1536, default: "1536" },
+    ],
+  },
+  // Image edit: one flat price per call.
+  "carrothub/qwen-image-edit-spicy/generation": { billing: [] },
+  // Image to video, priced per second of output and by resolution.
+  "carrothub/wan2.2-i2v-spicy/generation": {
+    billing: [
+      // The Go channel bills an omitted duration as 5 seconds. The host
+      // decodes a top-level duration into an integer and drops one it cannot
+      // read (5.5, "eight", 0), so an omitted duration looks the same as a
+      // rejected one here. It is required instead, so the plugin never charges
+      // 5 seconds for a duration the Go channel refuses.
+      { name: "seconds", source: "duration", kind: "int", enum: [5, 8], divisor: 1, required: true },
+      { name: "resolution", kind: "enum", values: { "480p": 1, "720p": 2 }, default: "480p" },
     ],
   },
 };
@@ -84,6 +101,14 @@ function upstreamParams(requestBody) {
   const params = {};
   const body = requestBody || {};
   for (const key of Object.keys(body)) params[key] = body[key];
+  // The host copies a lone image into images ([image]) before the plugin runs.
+  // MuleRouter reads the field the client wrote, so only image goes upstream.
+  // A client that itself sends both with the same single URL loses images,
+  // which it cannot be told apart from; neither field is priced.
+  const images = params.images;
+  if (typeof params.image === "string" && Array.isArray(images) && images.length === 1 && images[0] === params.image) {
+    delete params.images;
+  }
   const metadata = body.metadata;
   if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
     for (const key of Object.keys(metadata)) params[key] = metadata[key];
@@ -148,6 +173,9 @@ function billingRatios(endpoint, params) {
     const source = field.source || field.name;
     declared[source] = true;
     let raw = params[source];
+    if ((raw === undefined || raw === null) && field.required) {
+      throw new Error(source + " must be given as an integer, allowed: " + field.enum.map(formatNumber).join(", "));
+    }
     if (raw === undefined || raw === null) raw = field.default;
     const ratio = fieldRatio(field, raw);
     if (ratio > 0) ratios[field.name] = ratio;
