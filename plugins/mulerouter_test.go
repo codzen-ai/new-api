@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	builtinplugins "github.com/QuantumNous/new-api/plugins"
@@ -20,6 +21,9 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/router"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,13 +70,13 @@ func newMulerouterPlugin(t *testing.T) *jsplugin.LoadedPlugin {
 	return plugin
 }
 
-// mulerouterSubmitContext is a client request on the unified task route, with
-// the channel model mapping applied the way the task relay applies it.
+// mulerouterSubmitContext is a client submission with the channel model
+// mapping applied the way the task relay applies it.
 func mulerouterSubmitContext(t *testing.T, publicModel, body string, info *relaycommon.RelayInfo) *gin.Context {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/video/generations", strings.NewReader(body))
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/mulerouter", strings.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Set("model_mapping", mulerouterStagingModelMapping)
 	info.OriginModelName = publicModel
@@ -141,10 +145,17 @@ func submitToMulerouterPlugin(t *testing.T, plugin *jsplugin.LoadedPlugin, c *gi
 	return mulerouterSubmission{URL: url, Body: readMulerouterBody(t, reader), Ratios: ratios}
 }
 
+// submitThroughMulerouterPlugin is a client request on POST
+// /v1/tasks/mulerouter, which hands the plugin the client's whole JSON body:
+// PrepareTaskPluginSubmit stores it as the task request.
 func submitThroughMulerouterPlugin(t *testing.T, plugin *jsplugin.LoadedPlugin, publicModel, body string) mulerouterSubmission {
 	t.Helper()
 	info := mulerouterPluginChannel()
-	return submitToMulerouterPlugin(t, plugin, mulerouterSubmitContext(t, publicModel, body, info), info)
+	c := mulerouterSubmitContext(t, publicModel, body, info)
+	var request map[string]any
+	require.NoError(t, common.UnmarshalBodyReusable(c, &request))
+	c.Set("task_request", request)
+	return submitToMulerouterPlugin(t, plugin, c, info)
 }
 
 // submitThroughMulerouterVideosAPI is a client request on POST /v1/videos: the
@@ -177,7 +188,7 @@ func TestMulerouterPluginIsABuiltInPluginOnTaskPluginChannelsOnly(t *testing.T) 
 	assert.Empty(t, plugin.Meta.ChannelTypes, "type-64 channels and their tasks stay with the Go adaptor")
 	assert.Empty(t, plugin.Meta.Routes)
 	// Only the video endpoint is served on the OpenAI video API; the image
-	// endpoints answer only on the unified task route.
+	// endpoints answer only on POST /v1/tasks/mulerouter.
 	require.Len(t, plugin.Meta.Protocols, 1)
 	assert.Equal(t, "openai_video", plugin.Meta.Protocols[0].Name)
 	assert.Equal(t, []string{"carrothub/wan2.2-i2v-spicy/generation"}, plugin.Meta.Protocols[0].Models)
@@ -197,15 +208,10 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 		wanVideo = mulerouterBaseURL + "/vendors/carrothub/v1/wan2.2-i2v-spicy/generation"
 	)
 
-	// The host hands the plugin its own re-encoding of the request, so a few
-	// inputs cannot reach the plugin as the client wrote them. These are known
-	// host-caused differences, recorded per case:
-	// - pluginUpload is the body the plugin sends instead of Go's.
-	// - pluginRatios, with pluginUpload, is what the plugin bills for a
-	//   request Go refuses: the host drops a top-level duration it cannot
-	//   decode into an integer (5.5, "eight", 0), so the plugin sees no
-	//   duration, bills the 5-second default and sends none upstream.
-	// - pluginReject is the refusal the plugin answers with instead of Go's.
+	// The host checks every duration in the request before the plugin runs,
+	// so a duration that is not a number is refused by the host instead of
+	// the endpoint. pluginReject records the refusal the plugin's channel
+	// answers with in those cases instead of Go's.
 	cases := []struct {
 		name         string
 		model        string
@@ -214,8 +220,6 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 		upload       map[string]any
 		ratios       map[string]float64
 		reject       string
-		pluginUpload map[string]any
-		pluginRatios map[string]float64
 		pluginReject string
 	}{
 		{
@@ -225,6 +229,12 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 			url:    zImage,
 			upload: map[string]any{"prompt": "a cat"},
 			ratios: map[string]float64{"prompt_extend": 1.076923},
+		},
+		{
+			name:   "z-image without a prompt",
+			model:  "z-image-spicy",
+			body:   `{"model":"z-image-spicy","metadata":{"width":1024}}`,
+			reject: "prompt is required",
 		},
 		{
 			name:   "z-image prompt_extend false bills the base price",
@@ -337,7 +347,7 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 			reject: "parameter(s) fps, num_images affect the price of this model and are not enabled on this endpoint; remove them",
 		},
 		{
-			name:   "undeclared cost field among the unified fields",
+			name:   "undeclared top-level cost fields",
 			model:  "z-image-spicy",
 			body:   `{"model":"z-image-spicy","prompt":"a cat","size":"1024x1024","duration":5}`,
 			reject: "parameter(s) duration, size affect the price of this model and are not enabled on this endpoint; remove them",
@@ -373,7 +383,7 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 			reject: "parameter(s) n, width affect the price of this model and are not enabled on this endpoint; remove them",
 		},
 		{
-			name:   "qwen-image-edit refuses a unified cost field",
+			name:   "qwen-image-edit refuses a top-level cost field",
 			model:  "qwen-image-edit-spicy",
 			body:   `{"model":"qwen-image-edit-spicy","prompt":"snowy background","image":"https://cdn/in.png","size":"1024x1024"}`,
 			reject: "parameter(s) size affect the price of this model and are not enabled on this endpoint; remove them",
@@ -411,14 +421,12 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 			ratios: map[string]float64{"seconds": 8, "resolution": 1},
 		},
 		{
-			// The host decodes a string duration into a number; the price is the same.
-			name:         "wan2.2 duration written as a string",
-			model:        "wan2.2-i2v-spicy",
-			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":"8"}`,
-			url:          wanVideo,
-			upload:       map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": "8"},
-			ratios:       map[string]float64{"seconds": 8, "resolution": 1},
-			pluginUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": float64(8)},
+			name:   "wan2.2 duration written as a string",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":"8"}`,
+			url:    wanVideo,
+			upload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": "8"},
+			ratios: map[string]float64{"seconds": 8, "resolution": 1},
 		},
 		{
 			name:   "wan2.2 omitted duration bills 5 seconds",
@@ -440,31 +448,23 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 			pluginReject: "plugin usage value must be a number",
 		},
 		{
-			name:         "wan2.2 fractional top-level duration",
-			model:        "wan2.2-i2v-spicy",
-			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5.5}`,
-			url:          wanVideo,
-			reject:       "duration must be an integer, got 5.5",
-			pluginUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
-			pluginRatios: map[string]float64{"seconds": 5, "resolution": 1},
+			name:   "wan2.2 fractional top-level duration",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5.5}`,
+			reject: "duration must be an integer, got 5.5",
 		},
 		{
 			name:         "wan2.2 top-level duration that is not a number",
 			model:        "wan2.2-i2v-spicy",
 			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":"eight"}`,
-			url:          wanVideo,
 			reject:       `invalid value for duration: "eight" is not a number`,
-			pluginUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
-			pluginRatios: map[string]float64{"seconds": 5, "resolution": 1},
+			pluginReject: "plugin usage value must be a number",
 		},
 		{
-			name:         "wan2.2 top-level duration 0",
-			model:        "wan2.2-i2v-spicy",
-			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":0}`,
-			url:          wanVideo,
-			reject:       "invalid value 0 for duration, allowed: 5, 8",
-			pluginUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
-			pluginRatios: map[string]float64{"seconds": 5, "resolution": 1},
+			name:   "wan2.2 top-level duration 0",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":0}`,
+			reject: "invalid value 0 for duration, allowed: 5, 8",
 		},
 		{
 			name:   "wan2.2 fractional duration in metadata",
@@ -508,11 +508,6 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			goSubmission := submitThroughGoMulerouter(t, tc.model, tc.body)
 			pluginSubmission := submitThroughMulerouterPlugin(t, plugin, tc.model, tc.body)
-			if tc.pluginRatios != nil {
-				assert.Equal(t, tc.reject, goSubmission.Rejection)
-				assert.Equal(t, mulerouterSubmission{URL: tc.url, Body: tc.pluginUpload, Ratios: tc.pluginRatios}, pluginSubmission)
-				return
-			}
 			pluginReject := tc.pluginReject
 			if pluginReject == "" {
 				pluginReject = tc.reject
@@ -531,34 +526,35 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 				return
 			}
 			require.Empty(t, pluginSubmission.Rejection)
-			expected := goSubmission
-			if tc.pluginUpload != nil {
-				expected.Body = tc.pluginUpload
-			}
-			assert.Equal(t, expected, pluginSubmission)
+			assert.Equal(t, goSubmission, pluginSubmission)
 		})
 	}
 }
 
-// POST /v1/videos takes the unified task body, so a video submission must send
-// the same upstream request and bill the same multipliers there as on
-// /v1/video/generations, through the plugin and through the Go adaptor, or be
-// refused by all three. The cases cover each default and every enum value.
+// POST /v1/videos takes the host's task request body, so a video submission
+// with its vendor parameters under metadata must send the same upstream
+// request and bill the same multipliers there as on POST /v1/tasks/mulerouter
+// and through the Go adaptor, or be refused by all three. The cases cover each
+// default and every enum value.
 //
-// Vendor parameters reach the plugin only under metadata: the host keeps just
-// the unified task fields of a task-route request, and /v1/videos keeps the
-// same ones. The Go adaptor also reads vendor parameters from the top level,
-// so for those cases it sends and bills goUpload and goRatios, or refuses
-// with goReject, while both plugin routes still agree.
-func TestMulerouterPluginVideosAPIBillsLikeTheTaskRoute(t *testing.T) {
+// /v1/videos keeps only the task request fields, so vendor parameters reach
+// the plugin there only under metadata. /v1/tasks/mulerouter hands the plugin
+// the whole body, and the plugin then reads vendor parameters from the top
+// level as the Go adaptor does: for those cases both send and bill goUpload
+// and goRatios, or refuse with goReject, where /v1/videos sends upload.
+func TestMulerouterPluginVideosAPIBillsLikeTheTasksEntry(t *testing.T) {
 	plugin := newMulerouterPlugin(t)
 	const wanVideo = mulerouterBaseURL + "/vendors/carrothub/v1/wan2.2-i2v-spicy/generation"
 	cases := []struct {
-		name     string
-		body     string
-		upload   map[string]any
-		ratios   map[string]float64
-		reject   string
+		name   string
+		body   string
+		upload map[string]any
+		ratios map[string]float64
+		reject string
+		// goUpload/goRatios or goReject set what the Go adaptor and POST
+		// /v1/tasks/mulerouter do when it differs from /v1/videos. A case
+		// that sets none of them expects the same as /v1/videos: upload and
+		// ratios, or the refusal reject.
 		goUpload map[string]any
 		goRatios map[string]float64
 		goReject string
@@ -670,27 +666,32 @@ func TestMulerouterPluginVideosAPIBillsLikeTheTaskRoute(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			videos := submitThroughMulerouterVideosAPI(t, plugin, "wan2.2-i2v-spicy", tc.body)
-			taskRoute := submitThroughMulerouterPlugin(t, plugin, "wan2.2-i2v-spicy", tc.body)
+			tasksEntry := submitThroughMulerouterPlugin(t, plugin, "wan2.2-i2v-spicy", tc.body)
 			goSubmission := submitThroughGoMulerouter(t, "wan2.2-i2v-spicy", tc.body)
+			expected := mulerouterSubmission{URL: wanVideo, Body: tc.upload, Ratios: tc.ratios}
 			if tc.reject != "" {
-				assert.Equal(t, tc.reject, goSubmission.Rejection)
-				for _, submission := range []mulerouterSubmission{videos, taskRoute} {
-					assert.Contains(t, submission.Rejection, tc.reject)
-					assert.NotContains(t, submission.Rejection, "carrothub")
-				}
+				assert.Contains(t, videos.Rejection, tc.reject)
+				assert.NotContains(t, videos.Rejection, "carrothub")
+			} else {
+				assert.Equal(t, expected, videos)
+			}
+
+			// No Go expectation of its own: the Go side matches /v1/videos.
+			goReject := tc.goReject
+			if goReject == "" && tc.goUpload == nil {
+				goReject = tc.reject
+			}
+			if goReject != "" {
+				assert.Equal(t, goReject, goSubmission.Rejection)
+				assert.Contains(t, tasksEntry.Rejection, goReject)
+				assert.NotContains(t, tasksEntry.Rejection, "carrothub")
 				return
 			}
-			expected := mulerouterSubmission{URL: wanVideo, Body: tc.upload, Ratios: tc.ratios}
-			assert.Equal(t, expected, taskRoute)
-			assert.Equal(t, expected, videos)
-			switch {
-			case tc.goReject != "":
-				assert.Equal(t, tc.goReject, goSubmission.Rejection)
-			case tc.goUpload != nil:
-				assert.Equal(t, mulerouterSubmission{URL: wanVideo, Body: tc.goUpload, Ratios: tc.goRatios}, goSubmission)
-			default:
-				assert.Equal(t, expected, goSubmission)
+			if tc.goUpload != nil {
+				expected = mulerouterSubmission{URL: wanVideo, Body: tc.goUpload, Ratios: tc.goRatios}
 			}
+			assert.Equal(t, expected, goSubmission)
+			assert.Equal(t, expected, tasksEntry)
 		})
 	}
 }
@@ -732,7 +733,7 @@ func TestMulerouterPluginReadsTasksLikeGoAdaptor(t *testing.T) {
 	t.Run("submit response", func(t *testing.T) {
 		submit := func(adaptor relaychannel.TaskAdaptor, body string) (string, *taskdto.TaskError) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1/video/generations", nil)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/mulerouter", nil)
 			resp := &http.Response{StatusCode: http.StatusAccepted, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
 			parsed, taskErr := adaptor.ParseResponse(c, resp, info)
 			if taskErr != nil {
@@ -1027,4 +1028,179 @@ func TestMulerouterPluginRendersOpenAIVideoLikeGoAdaptor(t *testing.T) {
 		require.Error(t, err)
 		assert.NotContains(t, err.Error(), "carrothub")
 	})
+}
+
+// GET /v1/tasks/{task_id}/artifacts lists a completed image task's images as
+// image-1, image-2, ... in the order MuleRouter returns them, and each
+// content URL streams that image. A key past the last image, or one the task
+// does not have, is not found. Video tasks keep their single "video" artifact
+// (TestMulerouterPluginRendersOpenAIVideoLikeGoAdaptor).
+func TestMulerouterPluginListsImageArtifacts(t *testing.T) {
+	adaptor := relay.GetTaskAdaptor(constant.TaskPlatform(mulerouterPluginKey))
+	adaptor.Init(&relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeTaskPlugin, ChannelBaseUrl: mulerouterBaseURL, ApiKey: "k"}})
+	artifacts, ok := adaptor.(relaychannel.TaskArtifactProvider)
+	require.True(t, ok)
+	provider, ok := adaptor.(relaychannel.TaskContentRequestProvider)
+	require.True(t, ok)
+
+	imageTask := func(status model.TaskStatus, data string) *model.Task {
+		return &model.Task{
+			TaskID:      "task_public",
+			Platform:    constant.TaskPlatform(mulerouterPluginKey),
+			Status:      status,
+			Properties:  model.Properties{OriginModelName: "z-image-spicy", UpstreamModelName: "carrothub/z-image-spicy/generation"},
+			PrivateData: model.TaskPrivateData{UpstreamTaskID: "up-1"},
+			Data:        []byte(data),
+		}
+	}
+
+	done := imageTask(model.TaskStatusSuccess, `{"task_info":{"id":"up-1","status":"completed"},"images":["https://cdn/a.png","https://cdn/b.png"]}`)
+	listed, err := artifacts.ListArtifacts(done)
+	require.NoError(t, err)
+	assert.Equal(t, []relaychannel.TaskArtifact{{Key: "image-1", Type: "image"}, {Key: "image-2", Type: "image"}}, listed)
+
+	for _, tc := range []struct{ key, url string }{
+		{"image-1", "https://cdn/a.png"},
+		{"image-2", "https://cdn/b.png"},
+		{"image-3", ""},
+		{"image-0", ""},
+		{"image-01", ""},
+		{"image-1.0", ""},
+		{"image-1x", ""},
+		{"image-", ""},
+		{"video", ""},
+		{"image", ""},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			descriptor, err := provider.BuildContentRequest(t.Context(), done, tc.key, relaychannel.TaskArtifactClientRequest{Method: http.MethodGet})
+			if tc.url == "" {
+				require.ErrorContains(t, err, "artifact_not_found")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.url, descriptor.URL)
+			assert.Equal(t, http.MethodGet, descriptor.Method)
+			assert.True(t, descriptor.Credentialless, "MuleRouter result links are public")
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		task *model.Task
+	}{
+		{"still running", imageTask(model.TaskStatusInProgress, `{"task_info":{"id":"up-1","status":"processing"}}`)},
+		{"completed without results", imageTask(model.TaskStatusSuccess, `{"task_info":{"id":"up-1","status":"completed"}}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listed, err := artifacts.ListArtifacts(tc.task)
+			require.NoError(t, err)
+			assert.Empty(t, listed)
+		})
+	}
+}
+
+// Callers submit MuleRouter tasks on POST /v1/tasks/mulerouter. The entry pins
+// the plugin before channel selection, so Distribute picks the type-61 channel
+// bound to it for a public model name, and not a channel of another plugin or
+// another type that offers the same model at a higher priority. The request
+// goes through the registered task routes with a real API token, and the
+// submission reaches the bound channel's upstream and is filed under it.
+// Selection runs from the channel cache, as on a gateway with Redis.
+func TestMulerouterTasksEntryReachesTheBoundChannel(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	gin.SetMode(gin.TestMode)
+	service.InitHttpClient()
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+	previousSQLitePath, previousMaster := common.SQLitePath, common.IsMasterNode
+	previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+	previousBatch, previousLogConsume := common.BatchUpdateEnabled, common.LogConsumeEnabled
+	previousPrices := ratio_setting.ModelPrice2JSONString()
+	// InitDB also sets the column names token lookup quotes.
+	common.SQLitePath, common.IsMasterNode = t.TempDir()+"/tasks-entry.db", false
+	t.Setenv("SQL_DSN", "")
+	require.NoError(t, model.InitDB())
+	db := model.DB
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}, &model.Ability{}, &model.Task{}, &model.Log{}, &model.UserSubscription{}))
+	model.LOG_DB = db
+	common.RedisEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled = false, false, false
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"z-image-spicy":0.013,"wan2.2-i2v-spicy":0.02}`))
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.SetDatabaseTypes(previousType, previousLogType)
+		common.SQLitePath, common.IsMasterNode = previousSQLitePath, previousMaster
+		common.MemoryCacheEnabled, common.RedisEnabled = previousCache, previousRedis
+		common.BatchUpdateEnabled, common.LogConsumeEnabled = previousBatch, previousLogConsume
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices))
+		sqlDB, closeErr := db.DB()
+		require.NoError(t, closeErr)
+		require.NoError(t, sqlDB.Close())
+	})
+
+	require.NoError(t, db.Create(&model.User{
+		Id: 1, Username: "tasks-entry", Role: common.RoleCommonUser, Status: common.UserStatusEnabled,
+		Quota: 100_000_000, Group: "default", AuthVersion: 1,
+	}).Error)
+	require.NoError(t, db.Create(&model.Token{
+		Id: 1, UserId: 1, Key: "tasksentry", Name: "tasks entry", Status: common.TokenStatusEnabled,
+		ExpiredTime: -1, UnlimitedQuota: true,
+	}).Error)
+
+	var submitted []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		submitted = append(submitted, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"task_info":{"id":"up-1","status":"pending"}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a channel not bound to mulerouter received %s %s", r.Method, r.URL.Path)
+		http.Error(w, "wrong channel", http.StatusInternalServerError)
+	}))
+	t.Cleanup(elsewhere.Close)
+
+	mapping := mulerouterStagingModelMapping
+	channels := []*model.Channel{
+		{Id: 1, Type: constant.ChannelTypeTaskPlugin, Name: "mulerouter", BaseURL: &upstream.URL, Models: "z-image-spicy,wan2.2-i2v-spicy", ModelMapping: &mapping, Priority: common.GetPointer(int64(0))},
+		{Id: 2, Type: constant.ChannelTypeTaskPlugin, Name: "another plugin", BaseURL: &elsewhere.URL, Models: "z-image-spicy,wan2.2-i2v-spicy", Priority: common.GetPointer(int64(10))},
+		{Id: 3, Type: constant.ChannelTypeOpenAI, Name: "openai", BaseURL: &elsewhere.URL, Models: "z-image-spicy,wan2.2-i2v-spicy", Priority: common.GetPointer(int64(20))},
+	}
+	channels[0].SetSetting(kitdto.ChannelSettings{TaskPluginKey: mulerouterPluginKey})
+	channels[1].SetSetting(kitdto.ChannelSettings{TaskPluginKey: "sora"})
+	for _, channel := range channels {
+		channel.Key, channel.Status, channel.Group = "test-key", common.ChannelStatusEnabled, "default"
+		require.NoError(t, db.Create(channel).Error)
+		require.NoError(t, channel.AddAbilities(db))
+	}
+
+	common.MemoryCacheEnabled = true
+	model.InitChannelCache()
+	t.Cleanup(model.InitChannelCache)
+	engine := gin.New()
+	router.SetTaskRouter(engine)
+	for _, tc := range []struct {
+		publicModel string
+		body        string
+		path        string
+	}{
+		{"z-image-spicy", `{"model":"z-image-spicy","prompt":"a cat"}`, "/vendors/carrothub/v1/z-image-spicy/generation"},
+		{"wan2.2-i2v-spicy", `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png"}`, "/vendors/carrothub/v1/wan2.2-i2v-spicy/generation"},
+	} {
+		t.Run(tc.publicModel, func(t *testing.T) {
+			submitted = nil
+			request := httptest.NewRequest(http.MethodPost, "/v1/tasks/mulerouter", strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer sk-tasksentry")
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			assert.Equal(t, []string{http.MethodPost + " " + tc.path}, submitted)
+			var task model.Task
+			require.NoError(t, db.Order("id desc").First(&task).Error)
+			assert.Equal(t, 1, task.ChannelId)
+			assert.Equal(t, constant.TaskPlatform(mulerouterPluginKey), task.Platform)
+			assert.Equal(t, tc.publicModel, task.Properties.OriginModelName)
+		})
+	}
 }

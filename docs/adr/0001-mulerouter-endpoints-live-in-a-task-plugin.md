@@ -9,4 +9,4 @@ MuleRouter was kept as the one built-in Go task adaptor beside the task plugin s
 ## Consequences
 
 - Pricing stays per-call by MuleRouter model name times request-field ratios; the plugin reproduces the ratios, so charges do not change.
-- Clients reach MuleRouter only through the unified task route. The vendor-native `/vendors/...` path is dropped, and vendor parameters must be sent under `metadata`, because the plugin host passes only the unified request fields to a plugin on that route.
+- Clients submit MuleRouter tasks on `POST /v1/tasks/mulerouter` (videos also on `POST /v1/videos`) and read them on `GET /v1/tasks/{id}` and its artifacts. `POST /v1/video/generations` does not reach a Task Plugin channel, because the host does not pin a plugin on it before choosing a channel. The vendor-native `/vendors/...` path is dropped. Vendor parameters belong under `metadata`: `/v1/tasks/mulerouter` hands the plugin the whole body and also reads them from the top level, but `/v1/videos` keeps only the task request fields.

@@ -2,7 +2,7 @@
 
 面向终端用户。本文说明如何调用三个生成模型：文生图、图生图、图生视频。
 
-三个模型都是**异步任务**：提交请求拿到任务 ID，再轮询任务状态取结果。没有同步返回图片或视频的接口——生成需要几十秒到几分钟，不适合让请求一直挂着。
+三个模型都是**异步任务**：提交请求拿到任务 ID，再轮询任务状态，完成后取产物。没有同步返回图片或视频的接口——生成需要几十秒到几分钟，不适合让请求一直挂着。
 
 ## 目录
 
@@ -15,6 +15,8 @@
   - [qwen-image-edit-spicy 图生图](#qwen-image-edit-spicy图生图)
   - [wan2.2-i2v-spicy 图生视频](#wan22-i2v-spicy图生视频)
 - [查询任务](#查询任务)
+- [获取产物](#获取产物)
+- [视频的 OpenAI 兼容接口](#视频的-openai-兼容接口)
 - [计费](#计费)
 - [错误处理](#错误处理)
 - [完整示例](#完整示例)
@@ -46,7 +48,7 @@ export BASE_URL="https://your-site.com"
 export API_KEY="sk-你的令牌"
 ```
 
-所有请求都要带这两个头：
+提交和查询请求都要带这两个头：
 
 ```
 Authorization: Bearer sk-xxxxxxxx
@@ -58,18 +60,22 @@ Content-Type: application/json
 三个模型用同一套接口，只是 `model` 和参数不同。
 
 ```
-提交    POST  $BASE_URL/v1/video/generations
-查询    GET   $BASE_URL/v1/video/generations/{任务ID}
+提交      POST  $BASE_URL/v1/tasks/mulerouter
+查询      GET   $BASE_URL/v1/tasks/{任务ID}
+取产物    GET   $BASE_URL/v1/tasks/{任务ID}/artifacts
+下载产物  GET   上一步返回的 content_url
 ```
 
-> 接口路径里的 `video` 是历史命名，它是本站统一的**异步任务**接口，图片模型同样走这里。
+视频模型另有 OpenAI Video API 风格的一组接口，见[视频的 OpenAI 兼容接口](#视频的-openai-兼容接口)。
+
+> 不要用 `/v1/video/generations` 提交这三个模型，这个接口到不了它们。
 
 ### 第一步：提交任务
 
-`model`、`prompt`、`image`、`duration` 这几个通用参数写在请求体顶层；其余参数是某个模型专属的（如 `width`、`resolution`、`seed`），一律放在 `metadata` 对象里，详见[参数放在哪里](#参数放在哪里)：
+`model`、`prompt`、`image`、`duration` 这几个通用参数写在请求体顶层；其余参数是某个模型专属的（如 `width`、`resolution`、`seed`），建议放在 `metadata` 对象里，详见[参数放在哪里](#参数放在哪里)：
 
 ```bash
-curl -X POST "$BASE_URL/v1/video/generations" \
+curl -X POST "$BASE_URL/v1/tasks/mulerouter" \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -86,50 +92,70 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 
 ```json
 {
-  "id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
-  "task_id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
+  "id": "task_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+  "task_id": "task_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
   "model": "z-image-spicy",
   "status": "queued",
-  "created_at": 1786714838
+  "created_at": 1792504208
 }
 ```
 
 记下 `id`（与 `task_id` 相同），后面查询要用。提交返回只有这五个字段，不含 `object` 和 `progress`；任务进度请通过查询接口获取。
 
-### 第二步：轮询结果
+### 第二步：轮询状态
 
 ```bash
-curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
+curl "$BASE_URL/v1/tasks/task_AbCdEfGhIjKlMnOpQrStUvWxYz012345" \
   -H "Authorization: Bearer $API_KEY"
 ```
 
-任务完成时（`status` 为 `SUCCESS`），`result_url` 就是产物地址：
-
 ```json
 {
-  "code": "success",
-  "message": "",
-  "data": {
-    "task_id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
-    "status": "SUCCESS",
-    "progress": "100%",
-    "result_url": "https://.../result_00.png",
-    "fail_reason": "",
-    "submit_time": 1786714838,
-    "finish_time": 1786714902
-  }
+  "task_id": "task_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+  "platform": "<平台标识>",
+  "status": "SUCCESS",
+  "progress": "100%",
+  "fail_reason": "",
+  "created_at": 1792504208,
+  "finished_at": 1792504223
 }
 ```
 
-图片和视频都放在 `result_url` 里，用扩展名区分（`.png` / `.mp4`）。
+`status` 变成 `SUCCESS` 后去取产物。`platform` 是本站内部的标识，忽略即可。
+
+### 第三步：取产物
+
+```bash
+curl "$BASE_URL/v1/tasks/task_AbCdEfGhIjKlMnOpQrStUvWxYz012345/artifacts" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+```json
+{
+  "task_id": "task_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+  "artifacts": [
+    {
+      "key": "image-1",
+      "type": "image",
+      "content_url": "https://your-site.com/v1/tasks/task_AbCdEfGhIjKlMnOpQrStUvWxYz012345/artifacts/image-1/content?access=..."
+    }
+  ]
+}
+```
+
+`content_url` 就是产物的下载地址，直接 GET 即可，不用再带 `Authorization` 头：
+
+```bash
+curl -o result.png "<content_url>"
+```
 
 ## 模型参数
 
 ### 参数放在哪里
 
-请求体里的参数分两类，位置不同：
+请求体里的参数分两类：
 
-| 类别 | 参数 | 位置 |
+| 类别 | 参数 | 建议位置 |
 |---|---|---|
 | 通用参数 | `model`、`prompt`、`image`、`duration` | 请求体**顶层** |
 | 模型专属参数 | 其余参数，如 `width`、`height`、`prompt_extend`、`seed`、`last_image`、`resolution` | **`metadata` 对象**里 |
@@ -147,11 +173,11 @@ curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
 }
 ```
 
-**模型专属参数不要写在顶层**。顶层的模型专属参数不受支持，本站后续会直接忽略它们，按默认值生成和计费。例如把 `"resolution": "720p"` 写在顶层，得到的将是按 480p 生成、按 480p 计费的视频。现在就请改为写在 `metadata` 里，这个写法当前已经生效。
+在 `POST /v1/tasks/mulerouter` 上，模型专属参数写在顶层也会生效，并按实际取值计费；同一个参数顶层和 `metadata` 都写时以 `metadata` 为准。但视频的 `POST /v1/videos` 只认 `metadata` 里的模型专属参数，写在顶层的会被忽略、按默认值生成和计费——例如把 `"resolution": "720p"` 写在顶层，在 `/v1/videos` 上得到的是按 480p 生成、按 480p 计费的视频。所以模型专属参数请统一写在 `metadata` 里，这样两个接口的结果和扣费完全一样。
 
-通用参数也可以写进 `metadata`，两处同名时以 `metadata` 为准，但没有必要。
+`metadata` 必须是 JSON 对象，不要写成字符串。
 
-下面各表的「位置」一列标明了每个参数该放哪里。
+下面各表的「位置」一列标明了每个参数建议放哪里。
 
 ### z-image-spicy（文生图）
 
@@ -167,7 +193,7 @@ curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
 | `seed` | `metadata` | integer / null | | `null` | | 随机种子。同样的种子 + 同样的参数可复现同一张图；`null` 或 `0` 表示随机 |
 
 ```bash
-curl -X POST "$BASE_URL/v1/video/generations" \
+curl -X POST "$BASE_URL/v1/tasks/mulerouter" \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{
     "model": "z-image-spicy",
@@ -192,7 +218,7 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 | `seed` | `metadata` | integer / null | | `null` | 随机种子 |
 
 ```bash
-curl -X POST "$BASE_URL/v1/video/generations" \
+curl -X POST "$BASE_URL/v1/tasks/mulerouter" \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{
     "model": "qwen-image-edit-spicy",
@@ -220,7 +246,7 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 | `seed` | `metadata` | integer / null | | `null` | | 随机种子 |
 
 ```bash
-curl -X POST "$BASE_URL/v1/video/generations" \
+curl -X POST "$BASE_URL/v1/tasks/mulerouter" \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{
     "model": "wan2.2-i2v-spicy",
@@ -238,10 +264,10 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 ## 查询任务
 
 ```bash
-curl "$BASE_URL/v1/video/generations/{任务ID}" -H "Authorization: Bearer $API_KEY"
+curl "$BASE_URL/v1/tasks/{任务ID}" -H "Authorization: Bearer $API_KEY"
 ```
 
-`data.status` 有六种取值：
+`status` 有六种取值：
 
 | `status` | 含义 | 该做什么 |
 |---|---|---|
@@ -249,8 +275,10 @@ curl "$BASE_URL/v1/video/generations/{任务ID}" -H "Authorization: Bearer $API_
 | `SUBMITTED` | 已提交到生成服务 | 继续等 |
 | `QUEUED` | 排队中 | 继续等 |
 | `IN_PROGRESS` | 正在生成 | 继续等 |
-| `SUCCESS` | 完成 | 从 `result_url` 取结果 |
+| `SUCCESS` | 完成 | [获取产物](#获取产物) |
 | `FAILURE` | 失败 | 看 `fail_reason`，已扣费用自动退还 |
+
+`finished_at` 在任务结束前是 `0`。
 
 **轮询建议**：本站每 15 秒同步一次任务状态，查得比这更频繁不会更快拿到结果。
 
@@ -259,42 +287,94 @@ curl "$BASE_URL/v1/video/generations/{任务ID}" -H "Authorization: Bearer $API_
 
 任务**不需要你持续查询也会继续推进**。可以提交后关掉程序，过几分钟再来取结果。
 
-### 视频的 OpenAI 兼容格式
-
-视频模型另有一个 OpenAI Video API 风格的查询接口，方便直接对接 OpenAI 客户端：
+## 获取产物
 
 ```bash
-curl "$BASE_URL/v1/videos/{任务ID}" -H "Authorization: Bearer $API_KEY"
+curl "$BASE_URL/v1/tasks/{任务ID}/artifacts" -H "Authorization: Bearer $API_KEY"
 ```
+
+任务成功后，`artifacts` 列出每个产物：
+
+| 模型 | `key` | `type` |
+|---|---|---|
+| 图片模型 | `image-1`（有多张时依次是 `image-2`、`image-3`……） | `image` |
+| 视频模型 | `video` | `video` |
+
+视频任务的返回：
 
 ```json
 {
-  "id": "task_xxx",
+  "task_id": "task_ZyXwVuTsRqPoNmLkJiHgFeDcBa543210",
+  "artifacts": [
+    {
+      "key": "video",
+      "type": "video",
+      "content_url": "https://your-site.com/v1/tasks/task_ZyXwVuTsRqPoNmLkJiHgFeDcBa543210/artifacts/video/content?access=..."
+    }
+  ]
+}
+```
+
+任务还没成功时 `artifacts` 是空数组。
+
+每个产物的 `content_url` 都可以直接 GET 下载（也支持 HEAD），链接里已经带了访问凭证，不用再带 `Authorization` 头，可以直接交给浏览器或下载工具。
+
+## 视频的 OpenAI 兼容接口
+
+视频模型另有一组 OpenAI Video API 风格的接口，方便直接对接 OpenAI 客户端：
+
+```
+提交      POST  $BASE_URL/v1/videos
+查询      GET   $BASE_URL/v1/videos/{任务ID}
+下载视频  GET   $BASE_URL/v1/videos/{任务ID}/content
+```
+
+提交的请求体和 `/v1/tasks/mulerouter` 一样，但**模型专属参数只认 `metadata` 里的**（见[参数放在哪里](#参数放在哪里)）：
+
+```bash
+curl -X POST "$BASE_URL/v1/videos" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "model": "wan2.2-i2v-spicy",
+    "prompt": "镜头缓缓推进",
+    "image": "https://example.com/first-frame.png",
+    "duration": 8,
+    "metadata": {
+      "resolution": "720p"
+    }
+  }'
+```
+
+查询返回：
+
+```json
+{
+  "id": "task_ZyXwVuTsRqPoNmLkJiHgFeDcBa543210",
   "object": "video",
   "model": "wan2.2-i2v-spicy",
   "status": "completed",
   "progress": 100,
-  "created_at": 1786370025,
-  "completed_at": 1786370124,
+  "created_at": 1792504230,
+  "completed_at": 1792504283,
   "metadata": { "url": "https://.../result_00.mp4" }
 }
 ```
 
-`status` 取值为 `queued`、`in_progress`、`completed`、`failed`。`completed_at` 和 `metadata.url` 只在 `completed` 时出现，未完成的任务只有前六个字段。失败的任务带 `error`，`message` 与通用查询接口的 `fail_reason` 相同：
+`status` 取值为 `queued`、`in_progress`、`completed`、`failed`。`completed_at` 和 `metadata.url` 只在 `completed` 时出现，未完成的任务只有前六个字段。失败的任务带 `error`，`message` 与 `/v1/tasks/{任务ID}` 的 `fail_reason` 相同：
 
 ```json
 {
-  "id": "task_xxx",
+  "id": "task_ZyXwVuTsRqPoNmLkJiHgFeDcBa543210",
   "object": "video",
   "model": "wan2.2-i2v-spicy",
   "status": "failed",
   "progress": 100,
-  "created_at": 1786370025,
+  "created_at": 1792504230,
   "error": { "message": "...", "code": "task_failed" }
 }
 ```
 
-这个接口**只支持视频模型**，图片模型请用上面的通用查询接口。
+这组接口**只支持视频模型**，图片模型请用 `/v1/tasks` 系列接口。用 `/v1/tasks/mulerouter` 提交的视频任务也可以用 `/v1/videos/{任务ID}` 查询和下载，反过来也一样。
 
 ## 计费
 
@@ -330,23 +410,21 @@ curl "$BASE_URL/v1/videos/{任务ID}" -H "Authorization: Bearer $API_KEY"
 HTTP 状态码非 2xx，响应体形如：
 
 ```json
-{ "code": "invalid_request", "message": "invalid value 9 for duration, allowed: 5, 8", "data": null }
+{ "code": "plugin_request_invalid", "message": "...invalid value 9 for duration, allowed: 5, 8...", "data": null }
 ```
 
-| HTTP | `code` | 常见原因 | 怎么办 |
-|---|---|---|---|
-| 400 | `invalid_request` | 参数缺失或越界，`message` 写明了是哪个参数 | 按提示改参数 |
-| 400 | `invalid_request` | 提示某参数「affect the price of this model and are not enabled」 | 你传了一个会影响价格但本站未开放的参数，去掉它 |
-| 400 | `task_not_exist` | 查询用的任务 ID 不对 | 确认用的是提交时返回的 `id` |
+`message` 里会包含具体原因。常见原因：
 
-常见的具体报错：
-
-| `message` | 含义 |
+| `message` 中包含 | 含义 |
 |---|---|
 | `prompt is required` | 缺 `prompt`，或 `prompt` 是空字符串 |
 | `invalid value 9 for duration, allowed: 5, 8` | `duration` 只能是 5 或 8 |
 | `invalid value "1080p" for resolution, allowed: 480p, 720p` | 分辨率只能是 480p 或 720p |
 | `width must be <= 1536` | 尺寸超出 256 – 1536 |
+| `affect the price of this model and are not enabled on this endpoint` | 你传了一个会影响价格但这个模型不支持的参数（如给图片模型传 `duration`），去掉它 |
+| `plugin usage value must be a number` | `duration` 等数值参数写成了非数字 |
+
+查询和取产物时任务 ID 不对，返回 404。
 
 ### 鉴权与调度类错误
 
@@ -361,18 +439,18 @@ HTTP 状态码非 2xx，响应体形如：
 | 401 | 密钥无效、已删除或已过期 | 检查 `Authorization` 头，重新生成令牌 |
 | 403 | 令牌无权访问该模型 | 检查令牌的「可用模型」设置 |
 | 429 | 触发限流 | 退避后重试 |
-| 503 | 该模型当前无可用服务 | 确认 `model` 拼写正确，或联系管理员 |
+| 503 | 该模型当前无可用服务 | 确认 `model` 拼写正确、提交地址是 `/v1/tasks/mulerouter`，或联系管理员 |
 
 余额不足会在提交时明确报错，不会先生成再欠费。
 
 ## 完整示例
 
-两条 curl 就够了：一条提交拿任务 ID，一条查询取结果。中间等几十秒再查即可。
+三条 curl：一条提交拿任务 ID，一条查询状态，一条取产物地址。
 
 ### 第一条：提交
 
 ```bash
-curl -X POST "$BASE_URL/v1/video/generations" \
+curl -X POST "$BASE_URL/v1/tasks/mulerouter" \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -387,11 +465,11 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 
 ```json
 {
-  "id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
-  "task_id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
+  "id": "task_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+  "task_id": "task_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
   "model": "z-image-spicy",
   "status": "queued",
-  "created_at": 1786714838
+  "created_at": 1792504208
 }
 ```
 
@@ -400,31 +478,49 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 把上一步的 `id` 填进路径。图片等 15 秒左右再查，视频等 1 分钟左右。
 
 ```bash
-curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
+curl "$BASE_URL/v1/tasks/task_AbCdEfGhIjKlMnOpQrStUvWxYz012345" \
   -H "Authorization: Bearer $API_KEY"
 ```
 
 ```json
 {
-  "code": "success",
-  "message": "",
-  "data": {
-    "task_id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
-    "status": "SUCCESS",
-    "progress": "100%",
-    "result_url": "https://.../result_00.png",
-    "fail_reason": "",
-    "submit_time": 1786714838,
-    "finish_time": 1786714902
-  }
+  "task_id": "task_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+  "platform": "<平台标识>",
+  "status": "SUCCESS",
+  "progress": "100%",
+  "fail_reason": "",
+  "created_at": 1792504208,
+  "finished_at": 1792504223
 }
 ```
 
-`status` 还不是 `SUCCESS` 就过一会儿再执行同一条 curl，直到变成 `SUCCESS`（取 `result_url`）或 `FAILURE`（看 `fail_reason`）。
+`status` 还不是 `SUCCESS` 就过一会儿再执行同一条 curl，直到变成 `SUCCESS` 或 `FAILURE`（看 `fail_reason`）。
+
+### 第三条：取产物
+
+```bash
+curl "$BASE_URL/v1/tasks/task_AbCdEfGhIjKlMnOpQrStUvWxYz012345/artifacts" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+```json
+{
+  "task_id": "task_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+  "artifacts": [
+    {
+      "key": "image-1",
+      "type": "image",
+      "content_url": "https://your-site.com/v1/tasks/task_AbCdEfGhIjKlMnOpQrStUvWxYz012345/artifacts/image-1/content?access=..."
+    }
+  ]
+}
+```
+
+用 `content_url` 下载图片。
 
 ### 换成另外两个模型
 
-提交那条 curl 换 `model` 和参数即可，查询那条完全一样。
+提交那条 curl 换 `model` 和参数即可，查询和取产物完全一样。
 
 ```bash
 # 图生图
@@ -448,7 +544,7 @@ curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
 
 ## 注意事项
 
-**产物链接有有效期**，本站不做长期保存。**拿到结果后请尽快下载到你自己的存储**，不要把链接直接存进数据库当长期地址用。
+**产物链接有有效期**，本站不做长期保存。**拿到结果后请尽快下载到你自己的存储**，不要把 `content_url` 直接存进数据库当长期地址用。
 
 **超时**：任务超过 24 小时未完成会被自动判定为失败并退款。正常情况下图片一分钟内、视频几分钟内完成，如果长时间停在排队状态，通常是生成服务繁忙。
 
@@ -458,4 +554,4 @@ curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
 
 **图片输入**：`image` 和 `last_image` 支持公网链接或 base64。用链接时确保生成服务能访问到——内网地址、需要登录才能打开的链接都会导致任务失败。base64 建议不超过 10 MB。
 
-**参数位置**：`model`、`prompt`、`image`、`duration` 写在请求体顶层，其余模型专属参数（`width`、`height`、`prompt_extend`、`seed`、`last_image`、`resolution`）写在 `metadata` 对象里。写在顶层的模型专属参数不受支持，见[参数放在哪里](#参数放在哪里)。
+**参数位置**：`model`、`prompt`、`image`、`duration` 写在请求体顶层，其余模型专属参数（`width`、`height`、`prompt_extend`、`seed`、`last_image`、`resolution`）写在 `metadata` 对象里，见[参数放在哪里](#参数放在哪里)。
