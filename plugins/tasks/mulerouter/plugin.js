@@ -79,6 +79,8 @@ export const meta = {
   upstreams: ["vendor"],
   models: Object.keys(ENDPOINTS),
   fetchMode: "per_task",
+  // The OpenAI video API serves only the endpoints that produce videos.
+  protocols: [{ name: "openai_video", models: ["carrothub/wan2.2-i2v-spicy/generation"] }],
 };
 
 function upstreamPath(modelName) {
@@ -244,3 +246,53 @@ export function parseTaskResult(_ctx, body) {
   if (status === "FAILURE") return { status: status, reason: errorMessage(info.error) || "task failed" };
   return { status: status };
 }
+
+function videoURL(data) {
+  return data && Array.isArray(data.videos) && typeof data.videos[0] === "string" ? data.videos[0] : "";
+}
+
+// GET /v1/videos/{task_id}/content streams the first result video. The URL is
+// MuleRouter's public result link and needs no credentials.
+export function listArtifacts(task) {
+  if (task.status !== "SUCCESS" || !videoURL(task.data)) return [];
+  return [{ key: "video", type: "video" }];
+}
+
+export function buildContentRequest(ctx) {
+  const url = ctx.artifactKey === "video" ? videoURL(ctx.data) : "";
+  if (!url) throw new Error("artifact_not_found");
+  return { url: url, method: ctx.clientRequest.method, credentialless: true };
+}
+
+export const protocols = {
+  openai_video: {
+    // POST /v1/videos takes the same body as the unified task route, so a
+    // request is sent and charged exactly as it is there: vendor parameters
+    // go under metadata, and the OpenAI seconds and size fields are cost
+    // fields the endpoint refuses.
+    decodeRequest(ctx) {
+      const body = ctx.body;
+      if (!body || body.kind !== "json") throw new Error("a JSON request body is required");
+      const value = body.value;
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("the request body must be a JSON object");
+      if (typeof value.prompt !== "string" || value.prompt.trim() === "") throw new Error("prompt is required");
+      const requestBody = utils.json.clone(value);
+      requestBody.model = ctx.model;
+      // The task route files every MuleRouter task under image_to_video.
+      return { kind: "submit", model: ctx.model, action: "image_to_video", requestBody: requestBody };
+    },
+    // The host fills in id, object, model, status, progress and the
+    // timestamps; the plugin adds the result URL and the failure.
+    render(_ctx, task) {
+      const data = task.data || {};
+      for (const key of ["images", "audios"]) {
+        if (Array.isArray(data[key]) && data[key].length) throw new Error("this model does not produce videos");
+      }
+      const video = {};
+      const url = videoURL(data);
+      if (url) video.metadata = { url: url };
+      if (task.status === "FAILURE") video.error = { message: task.fail_reason || "", code: "task_failed" };
+      return video;
+    },
+  },
+};
