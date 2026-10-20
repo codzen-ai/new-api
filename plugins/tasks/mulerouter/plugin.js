@@ -33,6 +33,12 @@ const ENDPOINTS = {
   },
 };
 
+// The gateway's startup migration reads this table from the loaded plugin and
+// moves a Go MuleRouter channel onto the plugin only when every MuleRouter
+// endpoint the channel configures is declared here with the same billing
+// fields. No hook reads it.
+export const muleRouterEndpoints = ENDPOINTS;
+
 // Request fields known to scale MuleRouter's cost. An endpoint that does not
 // declare one of them refuses it, so an unpriced dimension never reaches the
 // vendor as an unbounded multiplier.
