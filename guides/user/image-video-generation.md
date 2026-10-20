@@ -280,6 +280,20 @@ curl "$BASE_URL/v1/videos/{任务ID}" -H "Authorization: Bearer $API_KEY"
 }
 ```
 
+`status` 取值为 `queued`、`in_progress`、`completed`、`failed`。`completed_at` 和 `metadata.url` 只在 `completed` 时出现，未完成的任务只有前六个字段。失败的任务带 `error`，`message` 与通用查询接口的 `fail_reason` 相同：
+
+```json
+{
+  "id": "task_xxx",
+  "object": "video",
+  "model": "wan2.2-i2v-spicy",
+  "status": "failed",
+  "progress": 100,
+  "created_at": 1786370025,
+  "error": { "message": "...", "code": "task_failed" }
+}
+```
+
 这个接口**只支持视频模型**，图片模型请用上面的通用查询接口。
 
 ## 计费
