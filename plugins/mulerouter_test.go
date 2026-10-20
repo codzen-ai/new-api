@@ -8,10 +8,12 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	builtinplugins "github.com/QuantumNous/new-api/plugins"
+	"github.com/QuantumNous/new-api/relay"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	taskplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
 	"github.com/QuantumNous/new-api/relay/channel/task/mulerouter"
@@ -592,4 +594,75 @@ func TestMulerouterPluginReadsTasksLikeGoAdaptor(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "UNKNOWN", pluginResult.Status)
 	})
+}
+
+// A task the Go adaptor submitted and the startup migration handed to the
+// plugin keeps its row as the Go adaptor wrote it, with only the platform
+// rewritten. Polling must resolve the plugin from that platform, rebuild the
+// query URL from the persisted MuleRouter model name and upstream task id, and
+// read the terminal state.
+func TestMulerouterPluginFinishesTasksTheGoAdaptorSubmitted(t *testing.T) {
+	task := &model.Task{
+		TaskID:    "task_go_submitted",
+		Platform:  constant.TaskPlatform("mulerouter"),
+		ChannelId: 87,
+		Action:    "generation",
+		Status:    model.TaskStatusInProgress,
+		Quota:     1000,
+		Properties: model.Properties{
+			OriginModelName:   "wan2.2-i2v-spicy",
+			UpstreamModelName: "carrothub/wan2.2-i2v-spicy/generation",
+		},
+		PrivateData: model.TaskPrivateData{
+			UpstreamTaskID: "up-go-1",
+			BillingSource:  "wallet",
+			BillingContext: &model.TaskBillingContext{
+				ModelPrice: 0.2, GroupRatio: 1, OtherRatios: map[string]float64{"seconds": 8, "resolution": 2},
+				OriginModelName: "wan2.2-i2v-spicy", PerCallBilling: true,
+			},
+		},
+		Data: []byte(`{"task_info":{"id":"up-go-1","status":"pending","created_at":"2026-10-20T00:00:00Z"}}`),
+	}
+
+	adaptor := relay.GetTaskAdaptor(task.Platform)
+	require.NotNil(t, adaptor, "the migrated platform resolves to the plugin")
+	adaptor.Init(&relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeTaskPlugin, ChannelId: 87}})
+
+	for _, tc := range []struct {
+		name   string
+		body   string
+		status model.TaskStatus
+		url    string
+		reason string
+	}{
+		{"still running", `{"task_info":{"id":"up-go-1","status":"processing"}}`, model.TaskStatusInProgress, "", ""},
+		{"completed", `{"task_info":{"id":"up-go-1","status":"completed"},"videos":["https://cdn/out.mp4"]}`, model.TaskStatusSuccess, "https://cdn/out.mp4", ""},
+		{"failed", `{"task_info":{"id":"up-go-1","status":"failed","error":{"title":"bad_prompt","detail":"blocked"}}}`, model.TaskStatusFailure, "", "bad_prompt: blocked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requested *http.Request
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requested = r
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+
+			resp, err := adaptor.FetchTask(server.URL, "sk-channel", task, "")
+			require.NoError(t, err)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.NotNil(t, requested)
+			assert.Equal(t, http.MethodGet, requested.Method)
+			assert.Equal(t, "/vendors/carrothub/v1/wan2.2-i2v-spicy/generation/up-go-1", requested.URL.Path)
+			assert.Equal(t, "Bearer sk-channel", requested.Header.Get("Authorization"))
+
+			result, err := adaptor.ParseTaskResult(task, resp, body)
+			require.NoError(t, err)
+			assert.Equal(t, string(tc.status), result.Status)
+			assert.Equal(t, tc.url, result.Url)
+			assert.Equal(t, tc.reason, result.Reason)
+		})
+	}
 }
