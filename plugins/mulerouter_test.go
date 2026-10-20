@@ -42,6 +42,9 @@ const (
 		"qwen-image-edit-spicy": "carrothub/qwen-image-edit-spicy/generation",
 		"wan2.2-i2v-spicy": "carrothub/wan2.2-i2v-spicy/generation"}`
 	mulerouterBaseURL = "https://api.mulerouter.ai"
+	// mulerouterPluginKey is the plugin's key, which is also the task platform
+	// of the tasks it serves.
+	mulerouterPluginKey = "mulerouter"
 )
 
 // mulerouterSubmission is what a channel does with one client submission:
@@ -56,9 +59,9 @@ type mulerouterSubmission struct {
 
 func newMulerouterPlugin(t *testing.T) *jsplugin.LoadedPlugin {
 	t.Helper()
-	source, err := builtinplugins.Source("mulerouter")
+	source, err := builtinplugins.Source(mulerouterPluginKey)
 	require.NoError(t, err)
-	plugin, err := jsplugin.NewRegistry().RegisterFactory(source, jsplugin.Options{Key: "mulerouter"})
+	plugin, err := jsplugin.NewRegistry().RegisterFactory(source, jsplugin.Options{Key: mulerouterPluginKey})
 	require.NoError(t, err)
 	return plugin
 }
@@ -108,13 +111,19 @@ func submitThroughGoMulerouter(t *testing.T, publicModel, body string) muleroute
 	return mulerouterSubmission{URL: url, Body: readMulerouterBody(t, reader), Ratios: adaptor.EstimateBilling(c, info)}
 }
 
-func submitThroughMulerouterPlugin(t *testing.T, plugin *jsplugin.LoadedPlugin, publicModel, body string) mulerouterSubmission {
-	t.Helper()
-	info := &relaycommon.RelayInfo{
-		ChannelMeta:   &relaycommon.ChannelMeta{ChannelType: 61, ChannelBaseUrl: mulerouterBaseURL, ApiKey: "k"},
+// mulerouterPluginChannel is a type-61 Task Plugin channel bound to the
+// plugin.
+func mulerouterPluginChannel() *relaycommon.RelayInfo {
+	return &relaycommon.RelayInfo{
+		ChannelMeta:   &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeTaskPlugin, ChannelBaseUrl: mulerouterBaseURL, ApiKey: "k"},
 		TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: "task_public"},
 	}
-	c := mulerouterSubmitContext(t, publicModel, body, info)
+}
+
+// submitToMulerouterPlugin runs a prepared client request through the plugin
+// task adaptor as the task relay does.
+func submitToMulerouterPlugin(t *testing.T, plugin *jsplugin.LoadedPlugin, c *gin.Context, info *relaycommon.RelayInfo) mulerouterSubmission {
+	t.Helper()
 	adaptor := taskplugin.New(plugin)
 	adaptor.Init(info)
 	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
@@ -132,15 +141,18 @@ func submitThroughMulerouterPlugin(t *testing.T, plugin *jsplugin.LoadedPlugin, 
 	return mulerouterSubmission{URL: url, Body: readMulerouterBody(t, reader), Ratios: ratios}
 }
 
+func submitThroughMulerouterPlugin(t *testing.T, plugin *jsplugin.LoadedPlugin, publicModel, body string) mulerouterSubmission {
+	t.Helper()
+	info := mulerouterPluginChannel()
+	return submitToMulerouterPlugin(t, plugin, mulerouterSubmitContext(t, publicModel, body, info), info)
+}
+
 // submitThroughMulerouterVideosAPI is a client request on POST /v1/videos: the
 // host has pinned the plugin's openai_video binding for the public model, and
 // the channel model mapping names the MuleRouter endpoint.
 func submitThroughMulerouterVideosAPI(t *testing.T, plugin *jsplugin.LoadedPlugin, publicModel, body string) mulerouterSubmission {
 	t.Helper()
-	info := &relaycommon.RelayInfo{
-		ChannelMeta:   &relaycommon.ChannelMeta{ChannelType: 61, ChannelBaseUrl: mulerouterBaseURL, ApiKey: "k"},
-		TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: "task_public"},
-	}
+	info := mulerouterPluginChannel()
 	c := mulerouterSubmitContext(t, publicModel, body, info)
 	c.Request.URL.Path = "/v1/videos"
 	var value any
@@ -156,25 +168,11 @@ func submitThroughMulerouterVideosAPI(t *testing.T, plugin *jsplugin.LoadedPlugi
 	}
 	c.Set(jsplugin.ContextKeyPinnedEndpoint, jsplugin.PinnedEndpoint{Plugin: plugin, Protocol: "openai_video", Model: publicModel, MappedModel: info.UpstreamModelName})
 	c.Set(jsplugin.ContextKeyProtocolRequest, protocolRequest)
-	adaptor := taskplugin.New(plugin)
-	adaptor.Init(info)
-	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
-		assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
-		return mulerouterSubmission{Rejection: taskErr.Message}
-	}
-	ratios, err := adaptor.EstimateBillingValidated(c, info)
-	if err != nil {
-		return mulerouterSubmission{Rejection: err.Error()}
-	}
-	url, err := adaptor.BuildRequestURL(info)
-	require.NoError(t, err)
-	reader, err := adaptor.BuildRequestBody(c, info)
-	require.NoError(t, err)
-	return mulerouterSubmission{URL: url, Body: readMulerouterBody(t, reader), Ratios: ratios}
+	return submitToMulerouterPlugin(t, plugin, c, info)
 }
 
 func TestMulerouterPluginIsABuiltInPluginOnTaskPluginChannelsOnly(t *testing.T) {
-	plugin, found := jsplugin.DefaultRegistry.Generation().Get("mulerouter")
+	plugin, found := jsplugin.DefaultRegistry.Generation().Get(mulerouterPluginKey)
 	require.True(t, found)
 	assert.Empty(t, plugin.Meta.ChannelTypes, "type-64 channels and their tasks stay with the Go adaptor")
 	assert.Empty(t, plugin.Meta.Routes)
@@ -546,15 +544,24 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 // the same upstream request and bill the same multipliers there as on
 // /v1/video/generations, through the plugin and through the Go adaptor, or be
 // refused by all three. The cases cover each default and every enum value.
+//
+// Vendor parameters reach the plugin only under metadata: the host keeps just
+// the unified task fields of a task-route request, and /v1/videos keeps the
+// same ones. The Go adaptor also reads vendor parameters from the top level,
+// so for those cases it sends and bills goUpload and goRatios, or refuses
+// with goReject, while both plugin routes still agree.
 func TestMulerouterPluginVideosAPIBillsLikeTheTaskRoute(t *testing.T) {
 	plugin := newMulerouterPlugin(t)
 	const wanVideo = mulerouterBaseURL + "/vendors/carrothub/v1/wan2.2-i2v-spicy/generation"
 	cases := []struct {
-		name   string
-		body   string
-		upload map[string]any
-		ratios map[string]float64
-		reject string
+		name     string
+		body     string
+		upload   map[string]any
+		ratios   map[string]float64
+		reject   string
+		goUpload map[string]any
+		goRatios map[string]float64
+		goReject string
 	}{
 		{
 			name:   "defaults bill 5 seconds at 480p",
@@ -606,6 +613,59 @@ func TestMulerouterPluginVideosAPIBillsLikeTheTaskRoute(t *testing.T) {
 			body:   `{"model":"wan2.2-i2v-spicy","image":"https://cdn/in.png"}`,
 			reject: "prompt is required",
 		},
+		{
+			name:     "a top-level resolution is dropped and bills 480p",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","resolution":"720p","seed":7}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 1},
+			goUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "resolution": "720p", "seed": float64(7)},
+			goRatios: map[string]float64{"seconds": 5, "resolution": 2},
+		},
+		{
+			name:     "a top-level unknown resolution is dropped",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","resolution":"1080p"}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 1},
+			goReject: `invalid value "1080p" for resolution, allowed: 480p, 720p`,
+		},
+		{
+			name:     "a top-level unpriced cost field is dropped",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","fps":24}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 1},
+			goReject: "parameter(s) fps affect the price of this model and are not enabled on this endpoint; remove them",
+		},
+		{
+			name:     "metadata still wins over a top-level resolution",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","resolution":"480p","metadata":{"resolution":"720p"}}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "resolution": "720p"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 2},
+			goUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "resolution": "720p"},
+			goRatios: map[string]float64{"seconds": 5, "resolution": 2},
+		},
+		{
+			name:     "a string duration is sent as a number",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":"8"}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": float64(8)},
+			ratios:   map[string]float64{"seconds": 8, "resolution": 1},
+			goUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": "8"},
+			goRatios: map[string]float64{"seconds": 8, "resolution": 1},
+		},
+		{
+			name:     "a fractional duration is dropped and bills 5 seconds",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5.5}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 1},
+			goReject: "duration must be an integer, got 5.5",
+		},
+		{
+			name:     "metadata sent as a JSON string",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":"{\"resolution\":\"720p\"}"}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "resolution": "720p"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 2},
+			goUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			goRatios: map[string]float64{"seconds": 5, "resolution": 1},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -621,9 +681,16 @@ func TestMulerouterPluginVideosAPIBillsLikeTheTaskRoute(t *testing.T) {
 				return
 			}
 			expected := mulerouterSubmission{URL: wanVideo, Body: tc.upload, Ratios: tc.ratios}
-			assert.Equal(t, expected, goSubmission)
 			assert.Equal(t, expected, taskRoute)
 			assert.Equal(t, expected, videos)
+			switch {
+			case tc.goReject != "":
+				assert.Equal(t, tc.goReject, goSubmission.Rejection)
+			case tc.goUpload != nil:
+				assert.Equal(t, mulerouterSubmission{URL: wanVideo, Body: tc.goUpload, Ratios: tc.goRatios}, goSubmission)
+			default:
+				assert.Equal(t, expected, goSubmission)
+			}
 		})
 	}
 }
@@ -655,7 +722,7 @@ func TestMulerouterPluginReadsTasksLikeGoAdaptor(t *testing.T) {
 	goAdaptor := &mulerouter.TaskAdaptor{}
 	pluginAdaptor := taskplugin.New(plugin)
 	info := &relaycommon.RelayInfo{
-		ChannelMeta:     &relaycommon.ChannelMeta{ChannelType: 61, ChannelBaseUrl: mulerouterBaseURL, ApiKey: "k", UpstreamModelName: "carrothub/z-image-spicy/generation"},
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeTaskPlugin, ChannelBaseUrl: mulerouterBaseURL, ApiKey: "k", UpstreamModelName: "carrothub/z-image-spicy/generation"},
 		OriginModelName: "z-image-spicy",
 		TaskRelayInfo:   &relaycommon.TaskRelayInfo{PublicTaskID: "task_public"},
 	}
@@ -767,7 +834,7 @@ func TestMulerouterPluginReadsTasksLikeGoAdaptor(t *testing.T) {
 func TestMulerouterPluginFinishesTasksTheGoAdaptorSubmitted(t *testing.T) {
 	task := &model.Task{
 		TaskID:    "task_go_submitted",
-		Platform:  constant.TaskPlatform("mulerouter"),
+		Platform:  constant.TaskPlatform(mulerouterPluginKey),
 		ChannelId: 87,
 		Action:    "generation",
 		Status:    model.TaskStatusInProgress,
@@ -839,14 +906,13 @@ func TestMulerouterPluginFinishesTasksTheGoAdaptorSubmitted(t *testing.T) {
 // Go adaptor also stamps an unfinished task with its last update time.
 func TestMulerouterPluginRendersOpenAIVideoLikeGoAdaptor(t *testing.T) {
 	var goConverter relaychannel.OpenAIVideoConverter = &mulerouter.TaskAdaptor{}
-	pluginConverter, ok := relay.GetTaskAdaptor(constant.TaskPlatform("mulerouter")).(relaychannel.OpenAIVideoConverter)
+	pluginConverter, ok := relay.GetTaskAdaptor(constant.TaskPlatform(mulerouterPluginKey)).(relaychannel.OpenAIVideoConverter)
 	require.True(t, ok)
 
-	videoTask := func(channelID int, status model.TaskStatus, progress, failReason, data string) *model.Task {
+	videoTask := func(status model.TaskStatus, progress, failReason, data string) *model.Task {
 		task := &model.Task{
 			TaskID:      "task_public",
-			Platform:    constant.TaskPlatform("mulerouter"),
-			ChannelId:   channelID,
+			Platform:    constant.TaskPlatform(mulerouterPluginKey),
 			Action:      "generation",
 			Status:      status,
 			Progress:    progress,
@@ -904,43 +970,38 @@ func TestMulerouterPluginRendersOpenAIVideoLikeGoAdaptor(t *testing.T) {
 			goCompletedAt: true,
 		},
 	}
-	for _, origin := range []struct {
-		name      string
-		channelID int
-	}{{"submitted by the Go adaptor", 87}, {"submitted by the plugin", 61}} {
-		for _, tc := range cases {
-			t.Run(origin.name+"/"+tc.name, func(t *testing.T) {
-				task := videoTask(origin.channelID, tc.status, tc.progress, tc.failReason, tc.data)
-				pluginBody, err := pluginConverter.ConvertToOpenAIVideo(task)
-				require.NoError(t, err)
-				assert.JSONEq(t, tc.want, string(pluginBody))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			task := videoTask(tc.status, tc.progress, tc.failReason, tc.data)
+			pluginBody, err := pluginConverter.ConvertToOpenAIVideo(task)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.want, string(pluginBody))
 
-				goBody, err := goConverter.ConvertToOpenAIVideo(task)
-				require.NoError(t, err)
-				var goVideo map[string]any
-				require.NoError(t, common.Unmarshal(goBody, &goVideo))
-				if tc.goCompletedAt {
-					assert.Equal(t, float64(task.UpdatedAt), goVideo["completed_at"])
-					delete(goVideo, "completed_at")
-				}
-				goJSON, err := common.Marshal(goVideo)
-				require.NoError(t, err)
-				assert.JSONEq(t, tc.want, string(goJSON))
-			})
-		}
+			goBody, err := goConverter.ConvertToOpenAIVideo(task)
+			require.NoError(t, err)
+			var goVideo map[string]any
+			require.NoError(t, common.Unmarshal(goBody, &goVideo))
+			if tc.goCompletedAt {
+				assert.Equal(t, float64(task.UpdatedAt), goVideo["completed_at"])
+				delete(goVideo, "completed_at")
+			}
+			goJSON, err := common.Marshal(goVideo)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.want, string(goJSON))
+		})
 	}
 
 	// GET /v1/videos/{task_id}/content streams the result URL, as the Go
 	// channel's tasks do through their stored result URL.
 	t.Run("content is the first result video", func(t *testing.T) {
-		adaptor := relay.GetTaskAdaptor(constant.TaskPlatform("mulerouter"))
+		adaptor := relay.GetTaskAdaptor(constant.TaskPlatform(mulerouterPluginKey))
 		adaptor.Init(&relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeTaskPlugin, ChannelBaseUrl: mulerouterBaseURL, ApiKey: "k"}})
 		provider, ok := adaptor.(relaychannel.TaskContentRequestProvider)
 		require.True(t, ok)
 		artifacts, ok := adaptor.(relaychannel.TaskArtifactProvider)
 		require.True(t, ok)
 
-		done := videoTask(61, model.TaskStatusSuccess, "100%", "", `{"task_info":{"id":"up-1","status":"completed"},"videos":["https://cdn/out.mp4","https://cdn/alt.mp4"]}`)
+		done := videoTask(model.TaskStatusSuccess, "100%", "", `{"task_info":{"id":"up-1","status":"completed"},"videos":["https://cdn/out.mp4","https://cdn/alt.mp4"]}`)
 		listed, err := artifacts.ListArtifacts(done)
 		require.NoError(t, err)
 		require.Len(t, listed, 1)
@@ -951,14 +1012,14 @@ func TestMulerouterPluginRendersOpenAIVideoLikeGoAdaptor(t *testing.T) {
 		assert.Equal(t, "https://cdn/out.mp4", descriptor.URL)
 		assert.True(t, descriptor.Credentialless)
 
-		running := videoTask(61, model.TaskStatusInProgress, "30%", "", `{"task_info":{"id":"up-1","status":"processing"}}`)
+		running := videoTask(model.TaskStatusInProgress, "30%", "", `{"task_info":{"id":"up-1","status":"processing"}}`)
 		listed, err = artifacts.ListArtifacts(running)
 		require.NoError(t, err)
 		assert.Empty(t, listed)
 	})
 
 	t.Run("an image task is not a video", func(t *testing.T) {
-		task := videoTask(61, model.TaskStatusSuccess, "100%", "", `{"task_info":{"id":"up-1","status":"completed"},"images":["https://cdn/a.png"]}`)
+		task := videoTask(model.TaskStatusSuccess, "100%", "", `{"task_info":{"id":"up-1","status":"completed"},"images":["https://cdn/a.png"]}`)
 		task.Properties = model.Properties{OriginModelName: "z-image-spicy", UpstreamModelName: "carrothub/z-image-spicy/generation"}
 		_, err := goConverter.ConvertToOpenAIVideo(task)
 		require.Error(t, err)

@@ -106,17 +106,17 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 			BaseURL: &baseURL, Models: "z-image-spicy,wan2.2-i2v-spicy", Group: "default,vip", ModelMapping: &mapping,
 			Weight: &weight, Priority: &priority, Setting: &setting, OtherSettings: muleRouterSettings(muleRouterStagingRoutes),
 		},
-		{Id: 2, Type: 61, Name: "legacy mulerouter", Key: "sk-legacy", OtherSettings: `{"mulerouter":` + muleRouterStagingRoutes + `}`},
+		{Id: 2, Type: constant.ChannelTypeTaskPlugin, Name: "legacy mulerouter", Key: "sk-legacy", OtherSettings: `{"mulerouter":` + muleRouterStagingRoutes + `}`},
 		{Id: 3, Type: constant.ChannelTypeTaskPlugin, Name: "sora", Key: "sk-sora", Setting: &soraSetting, OtherSettings: `{}`},
 		{Id: 4, Type: constant.ChannelTypeMuleRouter, Name: "undeclared endpoint", Key: "sk-4", OtherSettings: muleRouterSettings(undeclared)},
 		{Id: 5, Type: constant.ChannelTypeMuleRouter, Name: "repriced endpoint", Key: "sk-5", OtherSettings: muleRouterSettings(repriced)},
-		{Id: 6, Type: 61, Name: "legacy repriced", Key: "sk-6", OtherSettings: muleRouterSettings(repriced)},
+		{Id: 6, Type: constant.ChannelTypeTaskPlugin, Name: "legacy repriced", Key: "sk-6", OtherSettings: muleRouterSettings(repriced)},
 		{
 			Id: 7, Type: constant.ChannelTypeMuleRouter, Name: "chained mapping outside the route table", Key: "sk-7",
 			Models: "z-image,edit", ModelMapping: &chainedMapping, OtherSettings: muleRouterSettings(zImageOnly),
 		},
 		{
-			Id: 8, Type: 61, Name: "legacy unmapped model outside the route table", Key: "sk-8",
+			Id: 8, Type: constant.ChannelTypeTaskPlugin, Name: "legacy unmapped model outside the route table", Key: "sk-8",
 			Models: "carrothub/z-image-spicy/generation,carrothub/wan2.2-i2v-spicy/generation", OtherSettings: muleRouterSettings(zImageOnly),
 		},
 		{
@@ -172,10 +172,10 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		10: {constant.ChannelTypeTaskPlugin, `{"task_plugin_key":"mulerouter"}`, movedSettings},
 	}
 	expectedPlatforms := map[string]constant.TaskPlatform{
-		"task_go_in_flight":               "mulerouter",
-		"task_go_finished":                "mulerouter",
-		"task_go_before_type_move":        "mulerouter",
-		"task_legacy":                     "mulerouter",
+		"task_go_in_flight":               muleRouterPluginKey,
+		"task_go_finished":                muleRouterPluginKey,
+		"task_go_before_type_move":        muleRouterPluginKey,
+		"task_legacy":                     muleRouterPluginKey,
 		"task_sora":                       "sora",
 		"task_sora_legacy_platform":       "61",
 		"task_undeclared":                 "64",
@@ -184,7 +184,7 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		"task_chained_mapping":            "64",
 		"task_legacy_outside_route_table": "64",
 		"task_suffixed_model":             "64",
-		"task_harmless_mapping":           "mulerouter",
+		"task_harmless_mapping":           muleRouterPluginKey,
 	}
 
 	for run := 1; run <= 2; run++ {

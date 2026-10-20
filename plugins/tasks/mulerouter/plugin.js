@@ -9,6 +9,8 @@
 // - enum: the stringified value looks up its multiplier in values.
 // - default (a string) bills an omitted or null field; source names the request
 //   field when it differs from the multiplier name.
+// video marks the endpoints that produce videos, which the OpenAI video API
+// serves.
 const ENDPOINTS = {
   "carrothub/z-image-spicy/generation": {
     billing: [
@@ -22,6 +24,7 @@ const ENDPOINTS = {
   "carrothub/qwen-image-edit-spicy/generation": { billing: [] },
   // Image to video, priced per second of output and by resolution.
   "carrothub/wan2.2-i2v-spicy/generation": {
+    video: true,
     billing: [
       // An omitted duration bills 5 seconds, as in the Go channel. The host
       // decodes a top-level duration into an integer and drops one it cannot
@@ -36,7 +39,11 @@ const ENDPOINTS = {
 // The gateway's startup migration reads this table from the loaded plugin and
 // moves a Go MuleRouter channel onto the plugin only when every MuleRouter
 // endpoint the channel configures is declared here with the same billing
-// fields. No hook reads it.
+// fields. No hook reads it. The export is a private contract with
+// loadMuleRouterPluginEndpoints in model/mulerouter_channel_migration.go, not
+// part of the plugin API: keep its name and its {<model name>: {billing}}
+// shape. A missing or renamed export keeps every channel on the Go adaptor
+// (fail closed).
 export const muleRouterEndpoints = ENDPOINTS;
 
 // Request fields known to scale MuleRouter's cost. An endpoint that does not
@@ -80,7 +87,7 @@ export const meta = {
   models: Object.keys(ENDPOINTS),
   fetchMode: "per_task",
   // The OpenAI video API serves only the endpoints that produce videos.
-  protocols: [{ name: "openai_video", models: ["carrothub/wan2.2-i2v-spicy/generation"] }],
+  protocols: [{ name: "openai_video", models: Object.keys(ENDPOINTS).filter((name) => ENDPOINTS[name].video) }],
 };
 
 function upstreamPath(modelName) {
@@ -252,7 +259,8 @@ function videoURL(data) {
 }
 
 // GET /v1/videos/{task_id}/content streams the first result video. The URL is
-// MuleRouter's public result link and needs no credentials.
+// MuleRouter's public result link and needs no credentials. The host refuses
+// to load a plugin that claims openai_video without these two hooks.
 export function listArtifacts(task) {
   if (task.status !== "SUCCESS" || !videoURL(task.data)) return [];
   return [{ key: "video", type: "video" }];
@@ -264,19 +272,69 @@ export function buildContentRequest(ctx) {
   return { url: url, method: ctx.clientRequest.method, credentialless: true };
 }
 
+// TASK_REQUEST_STRINGS and taskRequestBody mirror the unified task request
+// (TaskSubmitReq in relay/common/relay_info.go) as the host hands it to the
+// plugin on POST /v1/video/generations: only its fields survive, so vendor
+// parameters reach the endpoint only through metadata.
+const TASK_REQUEST_STRINGS = ["model", "mode", "image", "size", "seconds", "input_reference"];
+
+// A duration the host cannot read as an integer is dropped, as the task route
+// drops it.
+function taskDuration(raw) {
+  if (typeof raw === "number") return Number.isInteger(raw) ? raw : 0;
+  if (typeof raw === "string" && /^[+-]?\d+$/.test(raw)) return Number(raw);
+  return 0;
+}
+
+function taskMetadata(raw) {
+  let metadata = raw;
+  if (typeof raw === "string" && raw !== "") {
+    try {
+      metadata = JSON.parse(raw);
+    } catch (_error) {
+      return null;
+    }
+  }
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || !Object.keys(metadata).length) return null;
+  return metadata;
+}
+
+function taskRequestBody(value) {
+  const body = { prompt: value.prompt };
+  for (const key of TASK_REQUEST_STRINGS) {
+    const field = value[key];
+    if (field === undefined || field === null) continue;
+    if (typeof field !== "string") throw new Error(key + " must be a string");
+    if (field !== "") body[key] = field;
+  }
+  if (value.images !== undefined && value.images !== null) {
+    if (!Array.isArray(value.images) || value.images.some((image) => typeof image !== "string")) {
+      throw new Error("images must be an array of strings");
+    }
+    if (value.images.length) body.images = value.images.slice();
+  }
+  // The task route copies a lone image into images.
+  if (!body.images && typeof body.image === "string" && body.image.trim() !== "") body.images = [body.image];
+  const duration = taskDuration(value.duration);
+  if (duration !== 0) body.duration = duration;
+  const metadata = taskMetadata(value.metadata);
+  if (metadata) body.metadata = utils.json.clone(metadata);
+  return body;
+}
+
 export const protocols = {
   openai_video: {
-    // POST /v1/videos takes the same body as the unified task route, so a
-    // request is sent and charged exactly as it is there: vendor parameters
-    // go under metadata, and the OpenAI seconds and size fields are cost
-    // fields the endpoint refuses.
+    // POST /v1/videos takes the same body as the unified task route and hands
+    // the endpoint the same request, so it is sent and charged exactly as it
+    // is there: vendor parameters go under metadata, and the OpenAI seconds
+    // and size fields are cost fields the endpoint refuses.
     decodeRequest(ctx) {
       const body = ctx.body;
       if (!body || body.kind !== "json") throw new Error("a JSON request body is required");
       const value = body.value;
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("the request body must be a JSON object");
       if (typeof value.prompt !== "string" || value.prompt.trim() === "") throw new Error("prompt is required");
-      const requestBody = utils.json.clone(value);
+      const requestBody = taskRequestBody(value);
       requestBody.model = ctx.model;
       // The task route files every MuleRouter task under image_to_video.
       return { kind: "submit", model: ctx.model, action: "image_to_video", requestBody: requestBody };

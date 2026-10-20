@@ -333,7 +333,7 @@ func InitResources() error {
 			common.SysError(common.LogText("failed to migrate retired frontend options: %s", err.Error()))
 		}
 		if err := model.MigrateMuleRouterChannelsToTaskPlugin(); err != nil {
-			common.SysError("failed to migrate MuleRouter channels to the task plugin: " + err.Error())
+			common.SysError(common.LogText("failed to migrate MuleRouter channels to the task plugin: %s", err.Error()))
 		}
 	}
 	model.InitOptionMap()
