@@ -277,15 +277,35 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 			ratios: map[string]float64{"prompt_extend": 1.076923},
 		},
 		{
-			name:   "z-image width above the bound",
+			name:   "z-image width at its minimum and height at its maximum",
 			model:  "z-image-spicy",
-			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"width":4096}}`,
+			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"width":256,"height":1536}}`,
+			url:    zImage,
+			upload: map[string]any{"prompt": "a cat", "width": float64(256), "height": float64(1536)},
+			ratios: map[string]float64{"prompt_extend": 1.076923},
+		},
+		{
+			name:   "z-image width just above the bound",
+			model:  "z-image-spicy",
+			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"width":1537}}`,
 			reject: "width must be <= 1536",
 		},
 		{
-			name:   "z-image height below the bound",
+			name:   "z-image width just below the bound",
 			model:  "z-image-spicy",
-			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"height":100}}`,
+			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"width":255}}`,
+			reject: "width must be >= 256",
+		},
+		{
+			name:   "z-image height just above the bound",
+			model:  "z-image-spicy",
+			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"height":1537}}`,
+			reject: "height must be <= 1536",
+		},
+		{
+			name:   "z-image height just below the bound",
+			model:  "z-image-spicy",
+			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"height":255}}`,
 			reject: "height must be >= 256",
 		},
 		{
@@ -459,6 +479,18 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 			model:  "wan2.2-i2v-spicy",
 			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":6}`,
 			reject: "invalid value 6 for duration, allowed: 5, 8",
+		},
+		{
+			name:   "wan2.2 duration just below its values",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":4}`,
+			reject: "invalid value 4 for duration, allowed: 5, 8",
+		},
+		{
+			name:   "wan2.2 duration just above its values",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":9}`,
+			reject: "invalid value 9 for duration, allowed: 5, 8",
 		},
 		{
 			name:   "wan2.2 unknown resolution",
