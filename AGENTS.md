@@ -51,6 +51,10 @@ GitHub Issues in `codzen-ai/new-api` (never upstream `QuantumNous/new-api`), via
 
 Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
 
+### Domain docs
+
+Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root, created lazily by `/domain-modeling`. See `docs/agents/domain.md`.
+
 ## Rules
 
 ### Common Code Quality
