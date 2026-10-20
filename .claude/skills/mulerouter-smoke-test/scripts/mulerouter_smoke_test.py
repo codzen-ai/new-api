@@ -33,10 +33,14 @@ UPSTREAM_BASE_PRICE = {
 }
 
 # 每个用例声明它期望的倍率，这是断言的核心：倍率不对就是计费不对。
+# Vendor parameter（width/height/prompt_extend/resolution）一律放在 metadata 下：插件渠道
+# 在统一任务入口上只收统一字段（prompt/image/duration/metadata 等），顶层的 Vendor
+# parameter 会被宿主丢弃；Go 渠道两种写法都认，metadata 优先。放 metadata 两边都能跑。
 CASES = {
     "z-image": {
         "model": "z-image-spicy",
-        "body": {"prompt": "a calico cat sitting on a sunlit windowsill", "width": 1024, "height": 1024},
+        "body": {"prompt": "a calico cat sitting on a sunlit windowsill",
+                 "metadata": {"width": 1024, "height": 1024}},
         "expect_ratios": {"prompt_extend": 1.076923},
         "artifact_ext": ".png",
         "produces_image": True,
@@ -44,7 +48,7 @@ CASES = {
     },
     "z-image-noextend": {
         "model": "z-image-spicy",
-        "body": {"prompt": "a red bicycle leaning on a brick wall", "prompt_extend": False},
+        "body": {"prompt": "a red bicycle leaning on a brick wall", "metadata": {"prompt_extend": False}},
         "expect_ratios": {"prompt_extend": 1.0},
         "artifact_ext": ".png",
         "produces_image": True,
@@ -60,7 +64,7 @@ CASES = {
     },
     "wan-480p": {
         "model": "wan2.2-i2v-spicy",
-        "body": {"prompt": "the camera slowly pushes in", "duration": 5, "resolution": "480p"},
+        "body": {"prompt": "the camera slowly pushes in", "duration": 5, "metadata": {"resolution": "480p"}},
         "expect_ratios": {"seconds": 5.0, "resolution": 1.0},
         "artifact_ext": ".mp4",
         "produces_image": False,
@@ -68,7 +72,8 @@ CASES = {
     },
     "wan-720p-8s": {
         "model": "wan2.2-i2v-spicy",
-        "body": {"prompt": "the camera orbits around the subject", "duration": 8, "resolution": "720p"},
+        "body": {"prompt": "the camera orbits around the subject", "duration": 8,
+                 "metadata": {"resolution": "720p"}},
         "expect_ratios": {"seconds": 8.0, "resolution": 2.0},
         "artifact_ext": ".mp4",
         "produces_image": False,
@@ -113,17 +118,21 @@ def request_raw(method, url, token, body=None, extra_headers=None, timeout=120):
 
 
 class Client:
-    def __init__(self, base_url, relay_key, admin_token, user_id=None):
+    """relay_key 发中转请求；account_token 是令牌主人的访问令牌（或登录拿到的 JWT），
+    读的余额、价格、分组倍率、消费日志都是这个账号自己的 —— 所以测哪个分组的渠道，
+    就用哪个分组账号的令牌和访问令牌，读数和扣费才对得上同一个人。"""
+
+    def __init__(self, base_url, relay_key, account_token, user_id=None):
         self.base = base_url.rstrip("/")
         self.relay_key = relay_key
-        self.admin_token = admin_token
-        self.admin_headers = {"New-API-User": str(user_id)} if user_id else None
+        self.account_token = account_token
+        self.account_headers = {"New-API-User": str(user_id)} if user_id else None
 
-    def admin_get(self, path, params=None):
+    def account_get(self, path, params=None):
         url = self.base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        status, _, payload = request_raw("GET", url, self.admin_token, extra_headers=self.admin_headers)
+        status, _, payload = request_raw("GET", url, self.account_token, extra_headers=self.account_headers)
         if status != 200 or not payload.get("success", True):
             # 带上完整 URL：认证失败最常见的原因是打错了实例，而不是令牌本身无效。
             raise ApiError(f"GET {url} -> HTTP {status}: {payload.get('message') or payload}")
@@ -139,28 +148,43 @@ class Client:
 # ---------------------------------------------------------------------------
 
 
-def preflight(client, case_names):
-    # /api/pricing 的分组倍率在 data 同级，所以要整个 payload，不能走 admin_get。
-    status, _, payload = request_raw("GET", client.base + "/api/pricing", client.admin_token,
-                                     extra_headers=client.admin_headers)
+def preflight(client, case_names, target_group=None):
+    # /api/pricing 的分组倍率在 data 同级，所以要整个 payload，不能走 account_get。
+    # 它按调用账号的分组算分组倍率、过滤可用分组，所以必须用令牌主人的访问令牌读。
+    status, _, payload = request_raw("GET", client.base + "/api/pricing", client.account_token,
+                                     extra_headers=client.account_headers)
     if status != 200 or not payload.get("success", True):
         raise ApiError(f"GET /api/pricing -> HTTP {status}: {payload.get('message') or payload}")
     pricing = {item["model_name"]: item for item in (payload.get("data") or [])}
     group_ratios = payload.get("group_ratio") or {}
 
-    user = client.admin_get("/api/user/self") or {}
-    group = user.get("group") or "default"
+    user = client.account_get("/api/user/self") or {}
+    # 令牌自己设了分组时，请求走令牌的分组而不是用户分组，这时要用 --group 指明。
+    group = target_group or user.get("group") or "default"
+    problems = []
+    if group not in group_ratios:
+        problems.append(f"分组 {group} 不在该账号的可用分组 {sorted(group_ratios)} 里")
     group_ratio = float(group_ratios.get(group, 1.0))
 
+    # 令牌名用来把消费日志限定在本次用的令牌上，同账号其他令牌的请求不会混进来。
+    status, _, usage = request_raw("GET", client.base + "/api/usage/token/", client.relay_key)
+    token_name = (usage.get("data") or {}).get("name") if status == 200 else None
+    if not token_name:
+        problems.append(f"读不到中转令牌信息（GET /api/usage/token/ -> HTTP {status}）")
+
     models = {}
-    problems = []
     for name in case_names:
         model_name = CASES[name]["model"]
         if model_name in models:
             continue
         entry = pricing.get(model_name)
         if entry is None:
-            problems.append(f"{model_name}: 未出现在 /api/pricing —— 渠道没配这个模型，或渠道被禁用")
+            problems.append(f"{model_name}: 未出现在该账号的 /api/pricing —— 可用分组里没有渠道配这个模型，"
+                            f"或渠道被禁用")
+            continue
+        enable_groups = entry.get("enable_groups") or []
+        if group not in enable_groups:
+            problems.append(f"{model_name}: 分组 {group} 里没有渠道提供它（可用于 {enable_groups}）")
             continue
         if entry.get("quota_type") != 1:
             problems.append(f"{model_name}: quota_type={entry.get('quota_type')}，没配「模型固定价格」。"
@@ -191,6 +215,8 @@ def preflight(client, case_names):
         })
 
     return {
+        "user": user.get("username"),
+        "token_name": token_name,
         "group": group,
         "group_ratio": group_ratio,
         "quota_before": user.get("quota"),
@@ -230,8 +256,8 @@ def guard_checks(client):
     guards = [
         {
             "name": "undeclared_cost_param",
-            "why": "未在 billing_vars 声明的成本字段（n）必须被拒，否则就是一个无界乘数入口",
-            "body": {"model": "z-image-spicy", "prompt": "guard check", "n": 4},
+            "why": "未在 billing_vars 声明的成本字段（n）藏在 metadata 里也必须被拒，否则就是一个无界乘数入口",
+            "body": {"model": "z-image-spicy", "prompt": "guard check", "metadata": {"n": 4}},
             "expect": (400,),
             "must_contain": ["affect the price"],
         },
@@ -254,7 +280,7 @@ def guard_checks(client):
         {
             "name": "width_out_of_range",
             "why": "声明了边界的字段即使不计费也要守住上界",
-            "body": {"model": "z-image-spicy", "prompt": "guard check", "width": 4096},
+            "body": {"model": "z-image-spicy", "prompt": "guard check", "metadata": {"width": 4096}},
             "expect": (400,),
             "must_contain": ["width"],
         },
@@ -383,12 +409,13 @@ def poll_task(client, task_id, timeout, interval):
         time.sleep(interval)
 
 
-def find_consume_log(client, model_name, since_ts, task_id, attempts=6, interval=5):
+def find_consume_log(client, model_name, since_ts, task_id, token_name, attempts=6, interval=5):
     """提交日志在扣费后立即写入，但日志走批量写盘，所以要给它几秒。
-    任务提交日志的 other 里没有 task_id，只能按模型名 + 时间窗口取最新一条。"""
+    任务提交日志的 other 里没有 task_id，只能按令牌 + 模型名 + 时间窗口取最新一条。"""
     for _ in range(attempts):
-        page = client.admin_get("/api/log/", {
-            "type": 2, "model_name": model_name, "start_timestamp": since_ts, "page_size": 50,
+        page = client.account_get("/api/log/self", {
+            "type": 2, "model_name": model_name, "token_name": token_name,
+            "start_timestamp": since_ts, "page_size": 50,
         }) or {}
         items = page.get("items") or []
         if items:
@@ -398,7 +425,7 @@ def find_consume_log(client, model_name, since_ts, task_id, attempts=6, interval
     return None
 
 
-def verify_case(result, case_name, group_ratio, model_price):
+def verify_case(result, case_name, group, group_ratio, model_price):
     case = CASES[case_name]
     checks = []
 
@@ -438,8 +465,11 @@ def verify_case(result, case_name, group_ratio, model_price):
         # ±1 容差吸收两步截断与浮点表示的差异，不是为了掩盖数量级错误。
         check("quota_charged", abs(got - want) <= 1,
               f"期望扣费 {want}，实际 {got}（model_price={model_price} × 倍率 × 分组倍率 {group_ratio}）")
+        # 日志里的分组就是选渠道用的分组：对不上说明请求没打到目标分组的渠道上。
+        check("group_routed", log.get("group") == group,
+              f"日志分组 {log.get('group')}，期望 {group}")
     else:
-        check("quota_charged", False, "没找到该模型的消费日志")
+        check("quota_charged", False, "没找到该令牌下该模型的消费日志")
 
     result["checks"] = checks
     result["passed"] = all(item["passed"] for item in checks)
@@ -456,7 +486,8 @@ def print_preflight(ctx, case_names, base_url):
     # 打出实例地址：NEW_API_BASE_URL 常常从别的 skill 继承下来指向另一个环境，
     # 而"令牌无效"的报错不会告诉你其实是打错了实例。
     print(f"实例 {base_url}")
-    print(f"用户分组 {ctx['group']}，分组倍率 {ctx['group_ratio']}，当前额度 {ctx['quota_before']}")
+    print(f"账号 {ctx['user']}，令牌 {ctx['token_name']}，目标分组 {ctx['group']}，"
+          f"分组倍率 {ctx['group_ratio']}，当前额度 {ctx['quota_before']}")
     for model_name, price in ctx["models"].items():
         cost = UPSTREAM_BASE_PRICE.get(model_name)
         margin = f"（上游成本 ${cost}）" if cost else ""
@@ -504,8 +535,14 @@ def main():
     parser = argparse.ArgumentParser(description="MuleRouter carrothub 渠道联调冒烟测试")
     parser.add_argument("--base-url", default=os.environ.get("NEW_API_BASE_URL", "http://localhost:3000"))
     parser.add_argument("--api-key", default=os.environ.get("NEW_API_KEY"))
-    parser.add_argument("--admin-token", default=os.environ.get("NEW_API_ADMIN_TOKEN"))
+    parser.add_argument("--access-token", "--admin-token", dest="access_token",
+                        default=os.environ.get("NEW_API_ACCESS_TOKEN") or os.environ.get("NEW_API_ADMIN_TOKEN"),
+                        help="令牌主人的访问令牌；不给就用 --username/--password 登录取")
     parser.add_argument("--user-id", default=os.environ.get("NEW_API_USER_ID"))
+    parser.add_argument("--username", default=os.environ.get("NEW_API_USERNAME"))
+    parser.add_argument("--password", default=os.environ.get("NEW_API_PASSWORD"))
+    parser.add_argument("--group", default=os.environ.get("MULEROUTER_TEST_GROUP"),
+                        help="请求应落到的分组（选中该分组的测试渠道）；默认取账号的用户分组")
     parser.add_argument("--cases", default=",".join(DEFAULT_CASES),
                         help=f"逗号分隔，可选：{', '.join(CASES)}")
     parser.add_argument("--image-url", default=os.environ.get("MULEROUTER_TEST_IMAGE_URL"),
@@ -518,8 +555,19 @@ def main():
     parser.add_argument("--out", default="/tmp/mulerouter-smoke-report.json")
     args = parser.parse_args()
 
-    if not args.api_key or not args.admin_token:
-        parser.error("需要 --api-key（中转令牌 sk-）和 --admin-token（管理员访问令牌）")
+    if not args.api_key:
+        parser.error("需要 --api-key（中转令牌 sk-）")
+    if not args.access_token and args.username and args.password:
+        # 登录返回的 JWT 放进 Authorization: Bearer 就能当访问令牌用，cookie 不需要。
+        status, _, payload = request_raw("POST", args.base_url.rstrip("/") + "/api/user/login", None,
+                                         body={"username": args.username, "password": args.password})
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if status != 200 or not isinstance(data, dict) or not data.get("access_token"):
+            raise ApiError(f"登录 {args.username} 失败：HTTP {status} {extract_message(payload)}")
+        args.access_token = data["access_token"]
+        args.user_id = args.user_id or (data.get("user") or {}).get("id")
+    if not args.access_token:
+        parser.error("需要 --access-token（令牌主人的访问令牌），或 --username/--password 登录")
 
     case_names = [name.strip() for name in args.cases.split(",") if name.strip()]
     unknown = [name for name in case_names if name not in CASES]
@@ -528,10 +576,10 @@ def main():
     # 需要输入图的用例排到后面，好用前面产出的图当输入。
     case_names.sort(key=lambda name: CASES[name]["needs_image"])
 
-    client = Client(args.base_url, args.api_key, args.admin_token, args.user_id)
+    client = Client(args.base_url, args.api_key, args.access_token, args.user_id)
     report = {"base_url": client.base, "cases": case_names}
 
-    ctx = preflight(client, case_names)
+    ctx = preflight(client, case_names, args.group)
     report["preflight"] = ctx
     print_preflight(ctx, case_names, client.base)
 
@@ -539,7 +587,7 @@ def main():
         guards = guard_checks(client)
         report["guards"] = guards
         print_guards(guards)
-        after = (client.admin_get("/api/user/self") or {}).get("quota")
+        after = (client.account_get("/api/user/self") or {}).get("quota")
         report["guards_free"] = after == ctx["quota_before"]
         print(f"\n  护栏阶段额度变化：{ctx['quota_before']} -> {after} "
               f"({'未扣费，符合预期' if report['guards_free'] else '有扣费，护栏可能跑在预扣费之后'})")
@@ -563,15 +611,15 @@ def main():
         result = run_case(client, name, image_url, args.poll_timeout, args.poll_interval)
         if result.get("task_id"):
             result["consume_log"] = find_consume_log(
-                client, CASES[name]["model"], result["submitted_at"], result["task_id"])
-            verify_case(result, name, ctx["group_ratio"], ctx["models"][CASES[name]["model"]])
+                client, CASES[name]["model"], result["submitted_at"], result["task_id"], ctx["token_name"])
+            verify_case(result, name, ctx["group"], ctx["group_ratio"], ctx["models"][CASES[name]["model"]])
         results.append(result)
         if CASES[name]["produces_image"] and not image_url and result.get("artifacts"):
             image_url = result["artifacts"][0]
             print(f"    产出图片将用作后续用例的输入：{image_url}")
 
     report["results"] = results
-    quota_after = (client.admin_get("/api/user/self") or {}).get("quota")
+    quota_after = (client.account_get("/api/user/self") or {}).get("quota")
     report["quota_after"] = quota_after
     spent = (ctx["quota_before"] or 0) - (quota_after or 0)
     report["quota_spent"] = spent
