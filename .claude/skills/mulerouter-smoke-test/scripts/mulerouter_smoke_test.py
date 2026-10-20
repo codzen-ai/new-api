@@ -128,15 +128,24 @@ class Client:
         self.account_token = account_token
         self.account_headers = {"New-API-User": str(user_id)} if user_id else None
 
-    def account_get(self, path, params=None):
+    def get_payload(self, path, params=None, token=...):
+        """GET 一个管理接口，返回整个响应体；非 200 或 success=false 抛 ApiError。
+        默认用账号的访问令牌；token 传中转令牌时不带 New-API-User 头。"""
         url = self.base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        status, _, payload = request_raw("GET", url, self.account_token, extra_headers=self.account_headers)
+        if token is ...:
+            token, headers = self.account_token, self.account_headers
+        else:
+            headers = None
+        status, _, payload = request_raw("GET", url, token, extra_headers=headers)
         if status != 200 or not payload.get("success", True):
             # 带上完整 URL：认证失败最常见的原因是打错了实例，而不是令牌本身无效。
             raise ApiError(f"GET {url} -> HTTP {status}: {payload.get('message') or payload}")
-        return payload.get("data")
+        return payload
+
+    def account_get(self, path, params=None):
+        return self.get_payload(path, params).get("data")
 
     def relay(self, method, path, body=None, token=...):
         key = self.relay_key if token is ... else token
@@ -149,12 +158,9 @@ class Client:
 
 
 def preflight(client, case_names, target_group=None):
-    # /api/pricing 的分组倍率在 data 同级，所以要整个 payload，不能走 account_get。
+    # /api/pricing 的分组倍率在 data 同级，所以要整个 payload。
     # 它按调用账号的分组算分组倍率、过滤可用分组，所以必须用令牌主人的访问令牌读。
-    status, _, payload = request_raw("GET", client.base + "/api/pricing", client.account_token,
-                                     extra_headers=client.account_headers)
-    if status != 200 or not payload.get("success", True):
-        raise ApiError(f"GET /api/pricing -> HTTP {status}: {payload.get('message') or payload}")
+    payload = client.get_payload("/api/pricing")
     pricing = {item["model_name"]: item for item in (payload.get("data") or [])}
     group_ratios = payload.get("group_ratio") or {}
 
@@ -167,10 +173,13 @@ def preflight(client, case_names, target_group=None):
     group_ratio = float(group_ratios.get(group, 1.0))
 
     # 令牌名用来把消费日志限定在本次用的令牌上，同账号其他令牌的请求不会混进来。
-    status, _, usage = request_raw("GET", client.base + "/api/usage/token/", client.relay_key)
-    token_name = (usage.get("data") or {}).get("name") if status == 200 else None
-    if not token_name:
-        problems.append(f"读不到中转令牌信息（GET /api/usage/token/ -> HTTP {status}）")
+    token_name = None
+    try:
+        token_name = (client.get_payload("/api/usage/token/", token=client.relay_key).get("data") or {}).get("name")
+        if not token_name:
+            problems.append("读不到中转令牌信息（GET /api/usage/token/ 没有返回令牌名）")
+    except ApiError as exc:
+        problems.append(f"读不到中转令牌信息（{exc}）")
 
     models = {}
     for name in case_names:
@@ -256,7 +265,7 @@ def guard_checks(client):
     guards = [
         {
             "name": "undeclared_cost_param",
-            "why": "未在 billing_vars 声明的成本字段（n）藏在 metadata 里也必须被拒，否则就是一个无界乘数入口",
+            "why": "计费声明（插件渠道 plugin.js 的 ENDPOINTS 表，Go 渠道的 billing_vars）没有的成本字段（n）藏在 metadata 里也必须被拒，否则就是一个无界乘数入口",
             "body": {"model": "z-image-spicy", "prompt": "guard check", "metadata": {"n": 4}},
             "expect": (400,),
             "must_contain": ["affect the price"],
@@ -286,7 +295,7 @@ def guard_checks(client):
         },
         {
             "name": "unlisted_model",
-            "why": "路由表里没有的模型既没有价格也没有乘数约束，必须拒绝",
+            "why": "端点表（插件渠道 plugin.js 的 ENDPOINTS 表，Go 渠道的 settings.mulerouter 路由）里没有的模型既没有价格也没有乘数约束，必须拒绝",
             # 未登记的模型通常先死在渠道选择上（503「无可用渠道」，平台既有约定），
             # 只有当渠道的 models 列了这个名字、路由表却没有时，才会走到适配器的 404。
             "body": {"model": "not-a-real-model", "prompt": "guard check"},
@@ -425,8 +434,10 @@ def find_consume_log(client, model_name, since_ts, task_id, token_name, attempts
     return None
 
 
-def verify_case(result, case_name, group, group_ratio, model_price):
+def verify_case(result, case_name, ctx):
     case = CASES[case_name]
+    group, group_ratio = ctx["group"], ctx["group_ratio"]
+    model_price = ctx["models"][case["model"]]
     checks = []
 
     def check(name, passed, detail):
@@ -612,7 +623,7 @@ def main():
         if result.get("task_id"):
             result["consume_log"] = find_consume_log(
                 client, CASES[name]["model"], result["submitted_at"], result["task_id"], ctx["token_name"])
-            verify_case(result, name, ctx["group"], ctx["group_ratio"], ctx["models"][CASES[name]["model"]])
+            verify_case(result, name, ctx)
         results.append(result)
         if CASES[name]["produces_image"] and not image_url and result.get("artifacts"):
             image_url = result["artifacts"][0]

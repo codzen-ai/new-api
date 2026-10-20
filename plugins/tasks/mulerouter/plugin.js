@@ -9,9 +9,6 @@
 // - enum: the stringified value looks up its multiplier in values.
 // - default (a string) bills an omitted or null field; source names the request
 //   field when it differs from the multiplier name.
-// - required refuses an omitted or null field instead of billing a default. It
-//   is the one departure from billing_vars, for an int field with an enum whose
-//   top-level value the host may have dropped.
 const ENDPOINTS = {
   "carrothub/z-image-spicy/generation": {
     billing: [
@@ -26,12 +23,11 @@ const ENDPOINTS = {
   // Image to video, priced per second of output and by resolution.
   "carrothub/wan2.2-i2v-spicy/generation": {
     billing: [
-      // The Go channel bills an omitted duration as 5 seconds. The host
+      // An omitted duration bills 5 seconds, as in the Go channel. The host
       // decodes a top-level duration into an integer and drops one it cannot
-      // read (5.5, "eight", 0), so an omitted duration looks the same as a
-      // rejected one here. It is required instead, so the plugin never charges
-      // 5 seconds for a duration the Go channel refuses.
-      { name: "seconds", source: "duration", kind: "int", enum: [5, 8], divisor: 1, required: true },
+      // read (5.5, "eight", 0), so such a request also bills 5 seconds and
+      // sends no duration, where the Go channel refuses it.
+      { name: "seconds", source: "duration", kind: "int", enum: [5, 8], default: "5", divisor: 1 },
       { name: "resolution", kind: "enum", values: { "480p": 1, "720p": 2 }, default: "480p" },
     ],
   },
@@ -117,47 +113,37 @@ function upstreamParams(requestBody) {
   return params;
 }
 
-function formatNumber(value) {
-  return String(value);
-}
-
 function quoted(value) {
   return JSON.stringify(String(value));
 }
 
-function stringify(value) {
-  if (typeof value === "string") return value;
-  return String(value);
-}
-
-function toNumber(value, source) {
-  if (typeof value === "number") return value;
-  if (typeof value === "string") {
-    const text = value.trim();
-    if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)) return Number(text);
-    throw new Error("invalid value for " + source + ": " + quoted(value) + " is not a number");
-  }
-  throw new Error("invalid value for " + source + ": " + String(value) + " is not a number");
-}
-
-// fieldRatio bounds one billing field and returns its multiplier; 0 means the
-// field is valid but does not affect the price.
-function fieldRatio(field, raw) {
-  const source = field.source || field.name;
+// fieldRatio bounds one billing field, read from the request field source,
+// and returns its multiplier; 0 means the field is valid but does not affect
+// the price.
+function fieldRatio(field, source, raw) {
   if (field.kind === "enum") {
-    const key = stringify(raw);
+    const key = String(raw);
     if (!Object.prototype.hasOwnProperty.call(field.values, key)) {
       throw new Error("invalid value " + quoted(key) + " for " + source + ", allowed: " + Object.keys(field.values).sort().join(", "));
     }
     return field.values[key];
   }
-  const value = toNumber(raw, source);
+  let value = raw;
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)) {
+      throw new Error("invalid value for " + source + ": " + quoted(raw) + " is not a number");
+    }
+    value = Number(text);
+  } else if (typeof raw !== "number") {
+    throw new Error("invalid value for " + source + ": " + String(raw) + " is not a number");
+  }
   if (!Number.isInteger(value)) throw new Error(source + " must be an integer, got " + String(raw));
   if (field.enum && field.enum.indexOf(value) < 0) {
-    throw new Error("invalid value " + formatNumber(value) + " for " + source + ", allowed: " + field.enum.map(formatNumber).join(", "));
+    throw new Error("invalid value " + String(value) + " for " + source + ", allowed: " + field.enum.map(String).join(", "));
   }
-  if (field.min !== undefined && value < field.min) throw new Error(source + " must be >= " + formatNumber(field.min));
-  if (field.max !== undefined && value > field.max) throw new Error(source + " must be <= " + formatNumber(field.max));
+  if (field.min !== undefined && value < field.min) throw new Error(source + " must be >= " + String(field.min));
+  if (field.max !== undefined && value > field.max) throw new Error(source + " must be <= " + String(field.max));
   if (!field.divisor) return 0;
   const ratio = value / field.divisor;
   if (!(ratio > 0) || !Number.isFinite(ratio)) throw new Error(source + " produced a non-positive billing multiplier");
@@ -173,11 +159,8 @@ function billingRatios(endpoint, params) {
     const source = field.source || field.name;
     declared[source] = true;
     let raw = params[source];
-    if ((raw === undefined || raw === null) && field.required) {
-      throw new Error(source + " must be given as an integer, allowed: " + field.enum.map(formatNumber).join(", "));
-    }
     if (raw === undefined || raw === null) raw = field.default;
-    const ratio = fieldRatio(field, raw);
+    const ratio = fieldRatio(field, source, raw);
     if (ratio > 0) ratios[field.name] = ratio;
   }
   const undeclared = Object.keys(params)
