@@ -2,7 +2,7 @@
 
 Specs and tickets for this repo live as GitHub issues in `codzen-ai/new-api`. Use the `gh` CLI for all operations.
 
-**Always pass `--repo codzen-ai/new-api`** (`gh api repos/codzen-ai/new-api/...` for API calls). This repo is a fork of `QuantumNous/new-api`, and `gh` must never create or edit anything upstream. The Linear server in `.mcp.json` (`linear-codzen`) is not the tracker for specs and tickets.
+**Always pass `--repo codzen-ai/new-api`** (`gh api repos/codzen-ai/new-api/...` for API calls). This repo is a fork of `QuantumNous/new-api`, and `gh` must never create or edit anything upstream.
 
 **Specs and tickets are both issues, told apart by structure:**
 
