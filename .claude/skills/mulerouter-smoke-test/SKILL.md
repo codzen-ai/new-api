@@ -9,7 +9,7 @@ description: Smoke-test a new-api instance's MuleRouter channel end to end — s
 
 1. **护栏还在吗** —— 未声明的成本字段、越界的计费乘数、未登记的模型，是否都在扣费之前被拒；
    厂商原生路径是否确实对客户端不可达；
-2. **链路通不通** —— 提交能不能拿到本站任务 ID，轮询能不能推到 `completed`，产物 URL 有没有；
+2. **链路通不通** —— 提交能不能拿到本站任务 ID，轮询能不能推到 `SUCCESS`，产物能不能下载；
 3. **钱扣得对不对** —— 实际扣费是否等于 `固定价 × 倍率 × 分组倍率`。
 
 第 1 项是免费的（那些请求本来就应该在预扣费之前被拒），所以流程刻意把它排在花钱之前 —— 护栏破了就没必要往下跑了，而且这一步顺带证明了"被拒的请求不扣钱"。
@@ -40,6 +40,8 @@ MuleRouter 渠道的正确性有一半不在 new-api 里：上游响应体的字
 
 ## 流程
 
+脚本走用户指南里的入口：提交 `POST /v1/tasks/mulerouter`，查询 `GET /v1/tasks/{id}`，产物 `GET /v1/tasks/{id}/artifacts` 和其中的 `content_url`。`POST /v1/video/generations` 到不了插件渠道，别用它测。
+
 ### 第 1 步：免费检查
 
 ```bash
@@ -67,15 +69,15 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 --cases z-image,qwen-edit,wan-480p,wan-720p-8s   # 加上最贵档，$0.47
 ```
 
-用例把 Vendor parameter（`width`、`height`、`prompt_extend`、`resolution`）放在 `metadata` 下，统一字段（`prompt`、`image`、`duration`）留在顶层：插件渠道会丢掉顶层的 Vendor parameter，Go 渠道两种写法都认，所以同一套用例在两种渠道上期望倍率相同。新加用例照这个写。
+用例按用户指南推荐的写法发：Vendor parameter（`width`、`height`、`prompt_extend`、`resolution`）放在 `metadata` 下，`prompt`、`image`、`duration` 留在顶层。`/v1/tasks/mulerouter` 两种写法都认，但 `/v1/videos` 只认 `metadata` 里的 Vendor parameter。新加用例照这个写。
 
-需要输入图的用例（`qwen-edit`、`wan-*`）会自动排到后面，用前面 z-image 的产出当输入。想固定输入图就传 `--image-url`。
+需要输入图的用例（`qwen-edit`、`wan-*`）会自动排到后面，用前面 z-image 产物的 `content_url` 当输入。这个地址在本站上，生成服务必须访问得到：测 localhost 这类外网到不了的实例时，传 `--image-url` 给一张公网图。
 
-单个用例的链路是：提交 → 断言 200 和本站任务 ID → 轮询到终态 → 读消费日志 → 复算扣费。视频用例慢，`--poll-timeout` 默认 600 秒。
+单个用例的链路是：提交 → 断言 200 和本站任务 ID → 轮询到终态 → 取产物并 HEAD 一次 `content_url` → 读消费日志 → 复算扣费。视频用例慢，`--poll-timeout` 默认 600 秒。
 
 ### 第 3 步：读结果
 
-每个用例八项断言，完整数据写进 `--out`（默认 `/tmp/mulerouter-smoke-report.json`）：
+每个用例九项断言，完整数据写进 `--out`（默认 `/tmp/mulerouter-smoke-report.json`）：
 
 | 断言 | 检查什么 | 失败意味着 |
 |---|---|---|
@@ -84,7 +86,8 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 | `task_id_masked` | 返回的 `id` 是 `task_` 开头的本站 ID | 上游 UUID 泄漏给了客户端 |
 | `billing_ratios` | 提交响应头 `X-New-Api-Other-Ratios` 等于该用例期望的倍率 | 计费变量没生效或配错了 |
 | `task_completed` | 轮询到 `SUCCESS` | 上游失败，或响应体形状和假设不符 |
-| `artifact_url` / `artifact_type` | `result_url` 是可用 URL 且扩展名符合模型的产物类型 | 产物解析和假设不符 |
+| `artifact_listed` | `/artifacts` 列出一个产物：图片模型是 `image-1`（`image`），视频模型是 `video`（`video`） | 产物解析和假设不符（插件的 `listArtifacts`） |
+| `artifact_content` | 不带令牌 HEAD `content_url` 返回 200，`Content-Type` 是 `image/*` 或 `video/*` | 产物下载链路不通（插件的 `buildContentRequest`，或上游产物链接失效） |
 | `quota_charged` | 扣费 == `固定价 × 倍率 × 分组倍率 × QuotaPerUnit` | 计费链路和预期不符 |
 | `group_routed` | 消费日志的分组 == 目标分组 | 请求没落到目标分组的渠道上，测的不是你想测的渠道 |
 
@@ -114,6 +117,7 @@ MuleRouter 有两种渠道，同一个概念落在不同地方。排障里的「
 | 计费声明 | 同一张 `ENDPOINTS` 表里每个端点的 `billing` | 同一份路由里的 `billing_vars` |
 | 成本字段黑名单 | `plugin.js` 的 `COST_FIELDS` | `relaykit/dto/mulerouter_settings.go` 的 `muleRouterCostParams` |
 | 响应解析 | `plugin.js` 的 `parseSubmitResponse` / `parseTaskResult` | `relay/channel/task/mulerouter/dto.go` 和 `ParseTaskResult` |
+| 产物 | `plugin.js` 的 `listArtifacts` / `buildContentRequest` | 任务的 `result_url` |
 
 插件渠道改的是代码，改完要重新部署；Go 渠道的端点表和计费声明是渠道配置，后台改了就生效。
 
@@ -121,7 +125,7 @@ MuleRouter 有两种渠道，同一个概念落在不同地方。排障里的「
 
 **提交 400 `model_price_error` / 「模型倍率未配置」** —— 模型没配固定价格。预检本该拦住，说明跑的时候跳过了预检。
 
-**提交 503「无可用渠道」** —— 目标分组里没有渠道提供这个名字（报错里带着分组名，先确认分组对不对），或渠道的模型列表里没有这个名字。客户端用的是短名（`z-image-spicy`），渠道需要同时配好模型列表和「模型重定向」把短名映射到三段式内部名 `{vendor}/{model}/{action}`。
+**提交 503「无可用渠道」** —— 先确认提交地址是 `/v1/tasks/mulerouter`：`/v1/video/generations` 到不了插件渠道。地址对的话，是目标分组里没有绑定 `mulerouter` 插件的渠道提供这个名字（报错里带着分组名，先确认分组对不对），或渠道的模型列表里没有这个名字。客户端用的是短名（`z-image-spicy`），渠道需要同时配好模型列表和「模型重定向」把短名映射到三段式内部名 `{vendor}/{model}/{action}`。
 
 **提交 404 `model_not_found`，或插件渠道报 `this model is not available on this channel`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在端点表里。检查两者是否对齐。
 
@@ -131,7 +135,7 @@ MuleRouter 有两种渠道，同一个概念落在不同地方。排障里的「
 
 **提交返回 `invalid_upstream_response`（没有 task id）** —— 上游 202 响应体的形状和文档不符。把原始响应贴出来，对着改响应解析（插件渠道是 `parseSubmitResponse`，Go 渠道是 `dto.go` 的 `taskResponse`）。
 
-**`billing_ratios` 拿到空表** —— 该用例期望的倍率本来就是空（`qwen-edit` 没有计费变量），这是正常的；如果 z-image 或 wan 拿到空表，说明计费声明里没有这个端点的计费字段，或 Vendor parameter 写在了顶层、被插件渠道丢掉后按默认值计费。
+**`billing_ratios` 拿到空表** —— 该用例期望的倍率本来就是空（`qwen-edit` 没有计费变量），这是正常的；如果 z-image 或 wan 拿到空表，说明计费声明里没有这个端点的计费字段。
 
 **额度对不上但每个用例都 PASS** —— 测试期间有其他请求在消费同一个账号。换一个专用账号重跑。
 

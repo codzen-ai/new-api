@@ -5,7 +5,10 @@
 
 1. preflight  读 /api/pricing 确认三个模型都配了固定价格，读余额，列出本轮预算
 2. guards     发一批应当被拒的请求，确认护栏生效且没有扣钱
-3. live       真实提交 -> 轮询 -> 完成，核对响应形状、产物、扣费金额
+3. live       真实提交 -> 轮询 -> 完成 -> 取产物，核对响应形状、产物、扣费金额
+
+提交走 POST /v1/tasks/mulerouter，查询走 GET /v1/tasks/{id}，产物从
+GET /v1/tasks/{id}/artifacts 取。
 
 用法见 SKILL.md。
 """
@@ -21,7 +24,8 @@ import urllib.request
 
 QUOTA_PER_UNIT = 500_000.0
 TASK_ID_PREFIX = "task_"
-SUBMIT_PATH = "/v1/video/generations"
+SUBMIT_PATH = "/v1/tasks/mulerouter"
+TASK_PATH = "/v1/tasks"
 
 # 上游基准单位价（美元），来自各端点文档页：图片按张，视频按秒 —— 与 billing_vars 的
 # 倍率基准一致（seconds 倍率取实际秒数，和 ali/gemini/sora/vertex 的约定相同）。
@@ -33,16 +37,16 @@ UPSTREAM_BASE_PRICE = {
 }
 
 # 每个用例声明它期望的倍率，这是断言的核心：倍率不对就是计费不对。
-# Vendor parameter（width/height/prompt_extend/resolution）一律放在 metadata 下：插件渠道
-# 在统一任务入口上只收统一字段（prompt/image/duration/metadata 等），顶层的 Vendor
-# parameter 会被宿主丢弃；Go 渠道两种写法都认，metadata 优先。放 metadata 两边都能跑。
+# Vendor parameter（width/height/prompt_extend/resolution）一律放在 metadata 下，prompt/image/
+# duration 留在顶层：/v1/tasks/mulerouter 两种写法都认（metadata 优先），但 /v1/videos 只认
+# metadata 里的 Vendor parameter。照用户指南推荐的写法发，测的就是用户实际会发的请求。
 CASES = {
     "z-image": {
         "model": "z-image-spicy",
         "body": {"prompt": "a calico cat sitting on a sunlit windowsill",
                  "metadata": {"width": 1024, "height": 1024}},
         "expect_ratios": {"prompt_extend": 1.076923},
-        "artifact_ext": ".png",
+        "artifact_type": "image",
         "produces_image": True,
         "needs_image": False,
     },
@@ -50,7 +54,7 @@ CASES = {
         "model": "z-image-spicy",
         "body": {"prompt": "a red bicycle leaning on a brick wall", "metadata": {"prompt_extend": False}},
         "expect_ratios": {"prompt_extend": 1.0},
-        "artifact_ext": ".png",
+        "artifact_type": "image",
         "produces_image": True,
         "needs_image": False,
     },
@@ -58,7 +62,7 @@ CASES = {
         "model": "qwen-image-edit-spicy",
         "body": {"prompt": "make the background a snowy mountain"},
         "expect_ratios": {},
-        "artifact_ext": ".png",
+        "artifact_type": "image",
         "produces_image": True,
         "needs_image": True,
     },
@@ -66,7 +70,7 @@ CASES = {
         "model": "wan2.2-i2v-spicy",
         "body": {"prompt": "the camera slowly pushes in", "duration": 5, "metadata": {"resolution": "480p"}},
         "expect_ratios": {"seconds": 5.0, "resolution": 1.0},
-        "artifact_ext": ".mp4",
+        "artifact_type": "video",
         "produces_image": False,
         "needs_image": True,
     },
@@ -75,7 +79,7 @@ CASES = {
         "body": {"prompt": "the camera orbits around the subject", "duration": 8,
                  "metadata": {"resolution": "720p"}},
         "expect_ratios": {"seconds": 8.0, "resolution": 2.0},
-        "artifact_ext": ".mp4",
+        "artifact_type": "video",
         "produces_image": False,
         "needs_image": True,
     },
@@ -284,7 +288,8 @@ def guard_checks(client):
             "body": {"model": "wan2.2-i2v-spicy", "prompt": "guard check",
                      "image": "https://example.com/x.png", "duration": 18446744073686646784},
             "expect": (400,),
-            "must_contain": ["duration"],
+            # 插件渠道上宿主先按自己的时长上限拒绝，理由里不带字段名。
+            "must_contain": ["duration", "exceeds the host limit"],
         },
         {
             "name": "width_out_of_range",
@@ -400,15 +405,15 @@ def run_case(client, name, image_url, poll_timeout, poll_interval):
 def poll_task(client, task_id, timeout, interval):
     deadline = time.time() + timeout
     while True:
-        status, _, payload = client.relay("GET", f"{SUBMIT_PATH}/{task_id}")
-        data = (payload.get("data") or {}) if isinstance(payload, dict) else {}
+        status, _, payload = client.relay("GET", f"{TASK_PATH}/{task_id}")
+        data = payload if isinstance(payload, dict) else {}
         last = {"poll_status": status, "final_body": payload}
         state = data.get("status")
         if state in ("SUCCESS", "FAILURE"):
             last["final_state"] = state
-            if data.get("result_url"):
-                last["artifacts"] = [data["result_url"]]
-            if state == "FAILURE":
+            if state == "SUCCESS":
+                last.update(fetch_artifacts(client, task_id))
+            else:
                 last["fail_reason"] = data.get("fail_reason") or extract_message(payload)
             return last
         if time.time() >= deadline:
@@ -416,6 +421,26 @@ def poll_task(client, task_id, timeout, interval):
             last["error"] = f"轮询 {timeout}s 未到终态，停在 {state}"
             return last
         time.sleep(interval)
+
+
+def fetch_artifacts(client, task_id):
+    """读产物列表，并用 HEAD 探一下第一个产物的 content_url：链接自带访问凭证，
+    不带令牌也要能取到，Content-Type 要和产物类型一致。"""
+    status, _, payload = client.relay("GET", f"{TASK_PATH}/{task_id}/artifacts")
+    artifacts = (payload.get("artifacts") or []) if isinstance(payload, dict) else []
+    found = {"artifacts_status": status, "artifacts": artifacts}
+    first = artifacts[0] if artifacts else {}
+    url = first.get("content_url") or ""
+    if url:
+        try:
+            head = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(head, timeout=60) as resp:
+                found["content_status"], found["content_type"] = resp.status, resp.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as exc:
+            found["content_status"], found["content_type"] = exc.code, ""
+        except urllib.error.URLError as exc:
+            found["content_status"], found["content_type"] = 0, str(exc.reason)
+    return found
 
 
 def find_consume_log(client, model_name, since_ts, task_id, token_name, attempts=6, interval=5):
@@ -464,10 +489,14 @@ def verify_case(result, case_name, ctx):
 
     if state == "SUCCESS":
         artifacts = result.get("artifacts") or []
-        first = str(artifacts[0]) if artifacts else ""
-        check("artifact_url", first.startswith("http"), f"产物 {artifacts[:1]}")
-        check("artifact_type", case["artifact_ext"] in first,
-              f"期望 {case['artifact_ext']} 产物，实际 {first[-40:]}")
+        first = artifacts[0] if artifacts else {}
+        want_key = "image-1" if case["artifact_type"] == "image" else "video"
+        check("artifact_listed", len(artifacts) == 1 and first.get("key") == want_key
+              and first.get("type") == case["artifact_type"],
+              f"期望一个 {want_key}（{case['artifact_type']}），实际 {[(a.get('key'), a.get('type')) for a in artifacts]}")
+        check("artifact_content", result.get("content_status") == 200
+              and str(result.get("content_type", "")).startswith(case["artifact_type"] + "/"),
+              f"HEAD content_url -> HTTP {result.get('content_status')}，Content-Type {result.get('content_type')}")
 
     log = result.get("consume_log")
     if log is not None:
@@ -626,7 +655,8 @@ def main():
             verify_case(result, name, ctx)
         results.append(result)
         if CASES[name]["produces_image"] and not image_url and result.get("artifacts"):
-            image_url = result["artifacts"][0]
+            # content_url 在本站上，生成服务要能访问到它；本地实例请传 --image-url。
+            image_url = result["artifacts"][0].get("content_url")
             print(f"    产出图片将用作后续用例的输入：{image_url}")
 
     report["results"] = results
