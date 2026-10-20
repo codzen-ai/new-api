@@ -137,7 +137,7 @@ func TestMulerouterPluginIsABuiltInPluginOnTaskPluginChannelsOnly(t *testing.T) 
 	assert.Empty(t, plugin.Meta.Routes)
 	assert.Empty(t, plugin.Meta.Protocols)
 	assert.Equal(t, mulerouterBaseURL, plugin.Meta.BaseURL)
-	assert.Contains(t, plugin.Meta.Models, "carrothub/z-image-spicy/generation")
+	assert.ElementsMatch(t, []string{"carrothub/z-image-spicy/generation", "carrothub/qwen-image-edit-spicy/generation", "carrothub/wan2.2-i2v-spicy/generation"}, plugin.Meta.Models)
 }
 
 // Every case runs through the Go MuleRouter adaptor (billing_vars and request
@@ -146,16 +146,27 @@ func TestMulerouterPluginIsABuiltInPluginOnTaskPluginChannelsOnly(t *testing.T) 
 // MuleRouter endpoints add their cases to this table.
 func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 	plugin := newMulerouterPlugin(t)
-	const zImage = mulerouterBaseURL + "/vendors/carrothub/v1/z-image-spicy/generation"
+	const (
+		zImage   = mulerouterBaseURL + "/vendors/carrothub/v1/z-image-spicy/generation"
+		qwenEdit = mulerouterBaseURL + "/vendors/carrothub/v1/qwen-image-edit-spicy/generation"
+		wanVideo = mulerouterBaseURL + "/vendors/carrothub/v1/wan2.2-i2v-spicy/generation"
+	)
 
+	// The host hands the plugin its own re-encoding of the request, so a few
+	// inputs cannot reach the plugin as the client wrote them. pluginUpload is
+	// the body the plugin sends instead of Go's when that does not change the
+	// price; pluginReject is the refusal the plugin answers with when it
+	// cannot charge what Go charges and refuses rather than guess.
 	cases := []struct {
-		name   string
-		model  string
-		body   string
-		url    string
-		upload map[string]any
-		ratios map[string]float64
-		reject string
+		name         string
+		model        string
+		body         string
+		url          string
+		upload       map[string]any
+		ratios       map[string]float64
+		reject       string
+		pluginUpload map[string]any
+		pluginReject string
 	}{
 		{
 			name:   "z-image defaults bill prompt rewriting",
@@ -261,22 +272,169 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 			body:   `{"model":"z-image-spicy","prompt":"a cat","size":"1024x1024","duration":5}`,
 			reject: "parameter(s) duration, size affect the price of this model and are not enabled on this endpoint; remove them",
 		},
+		{
+			name:   "qwen-image-edit sends the input image as the client wrote it and has no multipliers",
+			model:  "qwen-image-edit-spicy",
+			body:   `{"model":"qwen-image-edit-spicy","prompt":"snowy background","image":"https://cdn/in.png","metadata":{"seed":7}}`,
+			url:    qwenEdit,
+			upload: map[string]any{"prompt": "snowy background", "image": "https://cdn/in.png", "seed": float64(7)},
+			ratios: map[string]float64{},
+		},
+		{
+			name:   "qwen-image-edit forwards an images list the client sent",
+			model:  "qwen-image-edit-spicy",
+			body:   `{"model":"qwen-image-edit-spicy","prompt":"snowy background","images":["https://cdn/a.png","https://cdn/b.png"]}`,
+			url:    qwenEdit,
+			upload: map[string]any{"prompt": "snowy background", "images": []any{"https://cdn/a.png", "https://cdn/b.png"}},
+			ratios: map[string]float64{},
+		},
+		{
+			name:   "qwen-image-edit takes the input image from metadata",
+			model:  "qwen-image-edit-spicy",
+			body:   `{"model":"qwen-image-edit-spicy","prompt":"snowy background","image":"https://cdn/top.png","metadata":{"image":"https://cdn/meta.png"}}`,
+			url:    qwenEdit,
+			upload: map[string]any{"prompt": "snowy background", "image": "https://cdn/meta.png"},
+			ratios: map[string]float64{},
+		},
+		{
+			name:   "qwen-image-edit refuses a cost field it does not price",
+			model:  "qwen-image-edit-spicy",
+			body:   `{"model":"qwen-image-edit-spicy","prompt":"snowy background","image":"https://cdn/in.png","metadata":{"width":1024,"n":2}}`,
+			reject: "parameter(s) n, width affect the price of this model and are not enabled on this endpoint; remove them",
+		},
+		{
+			name:   "qwen-image-edit refuses a unified cost field",
+			model:  "qwen-image-edit-spicy",
+			body:   `{"model":"qwen-image-edit-spicy","prompt":"snowy background","image":"https://cdn/in.png","size":"1024x1024"}`,
+			reject: "parameter(s) size affect the price of this model and are not enabled on this endpoint; remove them",
+		},
+		{
+			name:   "wan2.2 bills 5 seconds at 480p",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"push in","image":"https://cdn/in.png","duration":5,"metadata":{"resolution":"480p"}}`,
+			url:    wanVideo,
+			upload: map[string]any{"prompt": "push in", "image": "https://cdn/in.png", "duration": float64(5), "resolution": "480p"},
+			ratios: map[string]float64{"seconds": 5, "resolution": 1},
+		},
+		{
+			name:   "wan2.2 bills 8 seconds at 720p",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":8,"metadata":{"resolution":"720p"}}`,
+			url:    wanVideo,
+			upload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": float64(8), "resolution": "720p"},
+			ratios: map[string]float64{"seconds": 8, "resolution": 2},
+		},
+		{
+			name:   "wan2.2 omitted resolution bills 480p",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":8}`,
+			url:    wanVideo,
+			upload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": float64(8)},
+			ratios: map[string]float64{"seconds": 8, "resolution": 1},
+		},
+		{
+			name:   "wan2.2 duration in metadata wins over the top level",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5,"metadata":{"duration":8}}`,
+			url:    wanVideo,
+			upload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": float64(8)},
+			ratios: map[string]float64{"seconds": 8, "resolution": 1},
+		},
+		{
+			// The host decodes a string duration into a number; the price is the same.
+			name:         "wan2.2 duration written as a string",
+			model:        "wan2.2-i2v-spicy",
+			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":"8"}`,
+			url:          wanVideo,
+			upload:       map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": "8"},
+			ratios:       map[string]float64{"seconds": 8, "resolution": 1},
+			pluginUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": float64(8)},
+		},
+		{
+			// The host drops an absent top-level duration and one it cannot read
+			// alike, so the plugin cannot bill Go's 5-second default safely.
+			name:         "wan2.2 omitted duration",
+			model:        "wan2.2-i2v-spicy",
+			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png"}`,
+			url:          wanVideo,
+			upload:       map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios:       map[string]float64{"seconds": 5, "resolution": 1},
+			pluginReject: "duration must be given as an integer, allowed: 5, 8",
+		},
+		{
+			name:         "wan2.2 fractional top-level duration",
+			model:        "wan2.2-i2v-spicy",
+			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5.5}`,
+			reject:       "duration must be an integer, got 5.5",
+			pluginReject: "duration must be given as an integer, allowed: 5, 8",
+		},
+		{
+			name:         "wan2.2 top-level duration that is not a number",
+			model:        "wan2.2-i2v-spicy",
+			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":"eight"}`,
+			reject:       `invalid value for duration: "eight" is not a number`,
+			pluginReject: "duration must be given as an integer, allowed: 5, 8",
+		},
+		{
+			name:         "wan2.2 top-level duration 0",
+			model:        "wan2.2-i2v-spicy",
+			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":0}`,
+			reject:       "invalid value 0 for duration, allowed: 5, 8",
+			pluginReject: "duration must be given as an integer, allowed: 5, 8",
+		},
+		{
+			name:   "wan2.2 fractional duration in metadata",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":{"duration":5.5}}`,
+			reject: "duration must be an integer, got 5.5",
+		},
+		{
+			name:   "wan2.2 duration outside its values",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":6}`,
+			reject: "invalid value 6 for duration, allowed: 5, 8",
+		},
+		{
+			name:   "wan2.2 unknown resolution",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5,"metadata":{"resolution":"1080p"}}`,
+			reject: `invalid value "1080p" for resolution, allowed: 480p, 720p`,
+		},
+		{
+			name:   "wan2.2 refuses seconds, which it reads from duration",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5,"metadata":{"seconds":8,"fps":24}}`,
+			reject: "parameter(s) fps, seconds affect the price of this model and are not enabled on this endpoint; remove them",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			goSubmission := submitThroughGoMulerouter(t, tc.model, tc.body)
 			pluginSubmission := submitThroughMulerouterPlugin(t, plugin, tc.model, tc.body)
+			pluginReject := tc.pluginReject
+			if pluginReject == "" {
+				pluginReject = tc.reject
+			}
+			if pluginReject != "" {
+				assert.Contains(t, pluginSubmission.Rejection, pluginReject)
+				assert.NotContains(t, pluginSubmission.Rejection, "carrothub")
+			}
 			if tc.reject != "" {
 				assert.Equal(t, tc.reject, goSubmission.Rejection)
-				assert.Contains(t, pluginSubmission.Rejection, tc.reject)
-				assert.NotContains(t, pluginSubmission.Rejection, "carrothub")
 				return
 			}
 			require.Empty(t, goSubmission.Rejection)
-			require.Empty(t, pluginSubmission.Rejection)
 			assert.Equal(t, mulerouterSubmission{URL: tc.url, Body: tc.upload, Ratios: tc.ratios}, goSubmission)
-			assert.Equal(t, goSubmission, pluginSubmission)
+			if pluginReject != "" {
+				return
+			}
+			require.Empty(t, pluginSubmission.Rejection)
+			expected := goSubmission
+			if tc.pluginUpload != nil {
+				expected.Body = tc.pluginUpload
+			}
+			assert.Equal(t, expected, pluginSubmission)
 		})
 	}
 }
@@ -343,24 +501,29 @@ func TestMulerouterPluginReadsTasksLikeGoAdaptor(t *testing.T) {
 	})
 
 	t.Run("query request", func(t *testing.T) {
-		requests := make([]*http.Request, 0, 2)
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			requests = append(requests, r)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"task_info":{"id":"up-1","status":"processing"}}`)
-		}))
-		defer server.Close()
-		task := &model.Task{TaskID: "task_public", Properties: model.Properties{OriginModelName: "z-image-spicy", UpstreamModelName: "carrothub/z-image-spicy/generation"}, PrivateData: model.TaskPrivateData{UpstreamTaskID: "up-1"}}
-		for _, adaptor := range []relaychannel.TaskAdaptor{goAdaptor, pluginAdaptor} {
-			resp, err := adaptor.FetchTask(server.URL, "k", task, "")
-			require.NoError(t, err)
-			resp.Body.Close()
-		}
-		require.Len(t, requests, 2)
-		for _, r := range requests {
-			assert.Equal(t, http.MethodGet, r.Method)
-			assert.Equal(t, "/vendors/carrothub/v1/z-image-spicy/generation/up-1", r.URL.Path)
-			assert.Equal(t, "Bearer k", r.Header.Get("Authorization"))
+		for _, tc := range []struct{ publicModel, upstreamModel, path string }{
+			{"z-image-spicy", "carrothub/z-image-spicy/generation", "/vendors/carrothub/v1/z-image-spicy/generation/up-1"},
+			{"wan2.2-i2v-spicy", "carrothub/wan2.2-i2v-spicy/generation", "/vendors/carrothub/v1/wan2.2-i2v-spicy/generation/up-1"},
+		} {
+			requests := make([]*http.Request, 0, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"task_info":{"id":"up-1","status":"processing"}}`)
+			}))
+			task := &model.Task{TaskID: "task_public", Properties: model.Properties{OriginModelName: tc.publicModel, UpstreamModelName: tc.upstreamModel}, PrivateData: model.TaskPrivateData{UpstreamTaskID: "up-1"}}
+			for _, adaptor := range []relaychannel.TaskAdaptor{goAdaptor, pluginAdaptor} {
+				resp, err := adaptor.FetchTask(server.URL, "k", task, "")
+				require.NoError(t, err)
+				resp.Body.Close()
+			}
+			server.Close()
+			require.Len(t, requests, 2)
+			for _, r := range requests {
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, tc.path, r.URL.Path)
+				assert.Equal(t, "Bearer k", r.Header.Get("Authorization"))
+			}
 		}
 	})
 
