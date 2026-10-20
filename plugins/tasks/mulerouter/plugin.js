@@ -9,6 +9,8 @@
 // - enum: the stringified value looks up its multiplier in values.
 // - default (a string) bills an omitted or null field; source names the request
 //   field when it differs from the multiplier name.
+// video marks the endpoints that produce videos, which the OpenAI video API
+// serves.
 const ENDPOINTS = {
   "carrothub/z-image-spicy/generation": {
     billing: [
@@ -22,6 +24,7 @@ const ENDPOINTS = {
   "carrothub/qwen-image-edit-spicy/generation": { billing: [] },
   // Image to video, priced per second of output and by resolution.
   "carrothub/wan2.2-i2v-spicy/generation": {
+    video: true,
     billing: [
       // An omitted duration bills 5 seconds, as in the Go channel. The host
       // decodes a top-level duration into an integer and drops one it cannot
@@ -36,7 +39,11 @@ const ENDPOINTS = {
 // The gateway's startup migration reads this table from the loaded plugin and
 // moves a Go MuleRouter channel onto the plugin only when every MuleRouter
 // endpoint the channel configures is declared here with the same billing
-// fields. No hook reads it.
+// fields. No hook reads it. The export is a private contract with
+// loadMuleRouterPluginEndpoints in model/mulerouter_channel_migration.go, not
+// part of the plugin API: keep its name and its {<model name>: {billing}}
+// shape. A missing or renamed export keeps every channel on the Go adaptor
+// (fail closed).
 export const muleRouterEndpoints = ENDPOINTS;
 
 // Request fields known to scale MuleRouter's cost. An endpoint that does not
@@ -80,7 +87,7 @@ export const meta = {
   models: Object.keys(ENDPOINTS),
   fetchMode: "per_task",
   // The OpenAI video API serves only the endpoints that produce videos.
-  protocols: [{ name: "openai_video", models: ["carrothub/wan2.2-i2v-spicy/generation"] }],
+  protocols: [{ name: "openai_video", models: Object.keys(ENDPOINTS).filter((name) => ENDPOINTS[name].video) }],
 };
 
 function upstreamPath(modelName) {
@@ -252,7 +259,8 @@ function videoURL(data) {
 }
 
 // GET /v1/videos/{task_id}/content streams the first result video. The URL is
-// MuleRouter's public result link and needs no credentials.
+// MuleRouter's public result link and needs no credentials. The host refuses
+// to load a plugin that claims openai_video without these two hooks.
 export function listArtifacts(task) {
   if (task.status !== "SUCCESS" || !videoURL(task.data)) return [];
   return [{ key: "video", type: "video" }];

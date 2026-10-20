@@ -23,11 +23,17 @@ import (
 // endpoints on type-61 Task Plugin channels.
 const muleRouterPluginKey = "mulerouter"
 
-// legacyMuleRouterChannelType is the type MuleRouter channels had before
-// upstream assigned 61 to the Task Plugin channel. A type-61 channel is a
+// MuleRouter channels had type 61 before upstream assigned it to the Task
+// Plugin channel (constant.ChannelTypeTaskPlugin). A type-61 channel is a
 // legacy MuleRouter channel only when it still carries a MuleRouter route
 // table; upstream Task Plugin channels have none.
-const legacyMuleRouterChannelType = 61
+//
+// The Go adaptor's tasks carry its channel type as their platform, or the
+// legacy type 61 when they were submitted before the type moved.
+var (
+	goMuleRouterTaskPlatform     = constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeMuleRouter))
+	legacyMuleRouterTaskPlatform = constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeTaskPlugin))
+)
 
 // MigrateMuleRouterChannelsToTaskPlugin moves every MuleRouter channel (type
 // 64, or a legacy type 61 carrying a MuleRouter route table) onto the
@@ -47,12 +53,12 @@ const legacyMuleRouterChannelType = 61
 func MigrateMuleRouterChannelsToTaskPlugin() error {
 	var channels []Channel
 	if err := DB.Select("id", "type", "models", "model_mapping", "setting", "settings").
-		Where("type IN ?", []int{constant.ChannelTypeMuleRouter, legacyMuleRouterChannelType}).
+		Where("type IN ?", []int{constant.ChannelTypeMuleRouter, constant.ChannelTypeTaskPlugin}).
 		Order("id").Find(&channels).Error; err != nil {
 		return err
 	}
 	channels = slices.DeleteFunc(channels, func(channel Channel) bool {
-		return channel.Type == legacyMuleRouterChannelType && channel.GetOtherSettings().MuleRouter == nil
+		return channel.Type == constant.ChannelTypeTaskPlugin && channel.GetOtherSettings().MuleRouter == nil
 	})
 	if len(channels) == 0 {
 		return nil
@@ -104,6 +110,12 @@ func MigrateMuleRouterChannelsToTaskPlugin() error {
 // loadMuleRouterPluginEndpoints returns the MuleRouter endpoints the loaded
 // mulerouter plugin declares, keyed by MuleRouter model name, with their
 // billing fields.
+//
+// It reads the plugin's muleRouterEndpoints export, which is not part of the
+// plugin API: the name and shape ({<model name>: {billing: [billing_vars]}})
+// are a contract between this migration and plugins/tasks/mulerouter/plugin.js.
+// A missing or renamed export fails here and keeps every channel on the Go
+// adaptor (fail closed).
 func loadMuleRouterPluginEndpoints() (map[string][]dto.MuleRouterBillingVar, error) {
 	plugin, ok := jsplugin.DefaultRegistry.Generation().Get(muleRouterPluginKey)
 	if !ok {
@@ -255,14 +267,8 @@ func moveMuleRouterChannelToTaskPlugin(channel *Channel) (int64, error) {
 		if result.RowsAffected != 1 {
 			return errors.New("the channel changed while it was being migrated")
 		}
-		// The Go adaptor's tasks carry its channel type, or the legacy type
-		// when they were submitted before the type moved.
-		goPlatforms := []constant.TaskPlatform{
-			constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeMuleRouter)),
-			constant.TaskPlatform(strconv.Itoa(legacyMuleRouterChannelType)),
-		}
 		result = tx.Model(&Task{}).
-			Where("channel_id = ? AND platform IN ?", channel.Id, goPlatforms).
+			Where("channel_id = ? AND platform IN ?", channel.Id, []constant.TaskPlatform{goMuleRouterTaskPlatform, legacyMuleRouterTaskPlatform}).
 			Update("platform", constant.TaskPlatform(muleRouterPluginKey))
 		movedTasks = result.RowsAffected
 		return result.Error
@@ -274,16 +280,16 @@ func moveMuleRouterChannelToTaskPlugin(channel *Channel) (int64, error) {
 // with the Go adaptor. A type-64 channel is already there; a legacy type-61
 // channel moves to type 64 with its tasks, or nothing would serve it.
 func keepMuleRouterChannelOnGoAdaptor(channel *Channel) error {
-	if channel.Type != legacyMuleRouterChannelType {
+	if channel.Type != constant.ChannelTypeTaskPlugin {
 		return nil
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&Channel{}).Where("id = ? AND type = ?", channel.Id, legacyMuleRouterChannelType).
+		if err := tx.Model(&Channel{}).Where("id = ? AND type = ?", channel.Id, constant.ChannelTypeTaskPlugin).
 			Update("type", constant.ChannelTypeMuleRouter).Error; err != nil {
 			return err
 		}
 		return tx.Model(&Task{}).
-			Where("channel_id = ? AND platform = ?", channel.Id, constant.TaskPlatform(strconv.Itoa(legacyMuleRouterChannelType))).
-			Update("platform", constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeMuleRouter))).Error
+			Where("channel_id = ? AND platform = ?", channel.Id, legacyMuleRouterTaskPlatform).
+			Update("platform", goMuleRouterTaskPlatform).Error
 	})
 }
