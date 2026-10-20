@@ -546,15 +546,24 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 // the same upstream request and bill the same multipliers there as on
 // /v1/video/generations, through the plugin and through the Go adaptor, or be
 // refused by all three. The cases cover each default and every enum value.
+//
+// Vendor parameters reach the plugin only under metadata: the host keeps just
+// the unified task fields of a task-route request, and /v1/videos keeps the
+// same ones. The Go adaptor also reads vendor parameters from the top level,
+// so for those cases it sends and bills goUpload and goRatios, or refuses
+// with goReject, while both plugin routes still agree.
 func TestMulerouterPluginVideosAPIBillsLikeTheTaskRoute(t *testing.T) {
 	plugin := newMulerouterPlugin(t)
 	const wanVideo = mulerouterBaseURL + "/vendors/carrothub/v1/wan2.2-i2v-spicy/generation"
 	cases := []struct {
-		name   string
-		body   string
-		upload map[string]any
-		ratios map[string]float64
-		reject string
+		name     string
+		body     string
+		upload   map[string]any
+		ratios   map[string]float64
+		reject   string
+		goUpload map[string]any
+		goRatios map[string]float64
+		goReject string
 	}{
 		{
 			name:   "defaults bill 5 seconds at 480p",
@@ -606,6 +615,59 @@ func TestMulerouterPluginVideosAPIBillsLikeTheTaskRoute(t *testing.T) {
 			body:   `{"model":"wan2.2-i2v-spicy","image":"https://cdn/in.png"}`,
 			reject: "prompt is required",
 		},
+		{
+			name:     "a top-level resolution is dropped and bills 480p",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","resolution":"720p","seed":7}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 1},
+			goUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "resolution": "720p", "seed": float64(7)},
+			goRatios: map[string]float64{"seconds": 5, "resolution": 2},
+		},
+		{
+			name:     "a top-level unknown resolution is dropped",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","resolution":"1080p"}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 1},
+			goReject: `invalid value "1080p" for resolution, allowed: 480p, 720p`,
+		},
+		{
+			name:     "a top-level unpriced cost field is dropped",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","fps":24}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 1},
+			goReject: "parameter(s) fps affect the price of this model and are not enabled on this endpoint; remove them",
+		},
+		{
+			name:     "metadata still wins over a top-level resolution",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","resolution":"480p","metadata":{"resolution":"720p"}}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "resolution": "720p"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 2},
+			goUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "resolution": "720p"},
+			goRatios: map[string]float64{"seconds": 5, "resolution": 2},
+		},
+		{
+			name:     "a string duration is sent as a number",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":"8"}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": float64(8)},
+			ratios:   map[string]float64{"seconds": 8, "resolution": 1},
+			goUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": "8"},
+			goRatios: map[string]float64{"seconds": 8, "resolution": 1},
+		},
+		{
+			name:     "a fractional duration is dropped and bills 5 seconds",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5.5}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 1},
+			goReject: "duration must be an integer, got 5.5",
+		},
+		{
+			name:     "metadata sent as a JSON string",
+			body:     `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":"{\"resolution\":\"720p\"}"}`,
+			upload:   map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "resolution": "720p"},
+			ratios:   map[string]float64{"seconds": 5, "resolution": 2},
+			goUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			goRatios: map[string]float64{"seconds": 5, "resolution": 1},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -621,9 +683,16 @@ func TestMulerouterPluginVideosAPIBillsLikeTheTaskRoute(t *testing.T) {
 				return
 			}
 			expected := mulerouterSubmission{URL: wanVideo, Body: tc.upload, Ratios: tc.ratios}
-			assert.Equal(t, expected, goSubmission)
 			assert.Equal(t, expected, taskRoute)
 			assert.Equal(t, expected, videos)
+			switch {
+			case tc.goReject != "":
+				assert.Equal(t, tc.goReject, goSubmission.Rejection)
+			case tc.goUpload != nil:
+				assert.Equal(t, mulerouterSubmission{URL: wanVideo, Body: tc.goUpload, Ratios: tc.goRatios}, goSubmission)
+			default:
+				assert.Equal(t, expected, goSubmission)
+			}
 		})
 	}
 }
