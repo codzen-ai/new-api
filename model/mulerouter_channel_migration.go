@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
 	"gorm.io/gorm"
 )
 
@@ -45,7 +46,7 @@ const legacyMuleRouterChannelType = 61
 // node only, before the channel cache loads.
 func MigrateMuleRouterChannelsToTaskPlugin() error {
 	var channels []Channel
-	if err := DB.Select("id", "type", "setting", "settings").
+	if err := DB.Select("id", "type", "models", "model_mapping", "setting", "settings").
 		Where("type IN ?", []int{constant.ChannelTypeMuleRouter, legacyMuleRouterChannelType}).
 		Order("id").Find(&channels).Error; err != nil {
 		return err
@@ -74,6 +75,10 @@ func MigrateMuleRouterChannelsToTaskPlugin() error {
 				if problem := muleRouterEndpointMismatch(&config.Routes[j], endpoints); problem != "" {
 					problems = append(problems, problem)
 				}
+			}
+			if outside := muleRouterEndpointsOutsideRouteTable(channel, config, endpoints); len(outside) > 0 {
+				problems = append(problems, fmt.Sprintf("the channel's models and model_mapping reach %s, which the plugin serves but the route table lacks",
+					strings.Join(outside, ", ")))
 			}
 		}
 		if len(problems) > 0 {
@@ -168,6 +173,48 @@ func muleRouterEndpointMismatch(route *dto.MuleRouterRoute, endpoints map[string
 		return fmt.Sprintf("%s billing field(s) %s differ from the plugin", name, strings.Join(differing, ", "))
 	}
 	return ""
+}
+
+// muleRouterEndpointsOutsideRouteTable returns, sorted, the plugin endpoints a
+// request for one of the channel's models reaches through its model_mapping
+// although the channel's route table lacks them. The Go adaptor refuses such a
+// request, while the plugin serves every endpoint in its table, so moving the
+// channel would make it serve and charge for them.
+//
+// The mapping is followed as the relay's ModelMappedHelper does, through
+// followChannelModelMapping with each hop's reasoning-suffix fallback filled
+// in first. A mapping the relay cannot read or that cycles fails every request
+// on both implementations, so it reaches nothing. Names neither in the route
+// table nor in the plugin table are refused by both and are not reported.
+func muleRouterEndpointsOutsideRouteTable(channel *Channel, config *dto.MuleRouterConfig, endpoints map[string][]dto.MuleRouterBillingVar) []string {
+	modelMap := map[string]string{}
+	if mapping := channel.GetModelMapping(); mapping != "" && mapping != "{}" {
+		if err := common.UnmarshalJsonStr(mapping, &modelMap); err != nil {
+			return nil
+		}
+	}
+	models := channel.GetModels()
+	hops := slices.Concat(models, slices.Collect(maps.Values(modelMap)))
+	for _, hop := range hops {
+		if modelMap[hop] == "" {
+			modelMap[hop] = modelMap[hostreasoning.BaseModelName(hop)]
+		}
+	}
+	var outside []string
+	for _, name := range models {
+		upstream, cyclic := followChannelModelMapping(modelMap, name)
+		if cyclic {
+			continue
+		}
+		if _, served := endpoints[upstream]; !served {
+			continue
+		}
+		if _, routed := config.FindRouteByModelName(upstream); !routed && !slices.Contains(outside, upstream) {
+			outside = append(outside, upstream)
+		}
+	}
+	slices.Sort(outside)
+	return outside
 }
 
 // moveMuleRouterChannelToTaskPlugin binds the channel to the mulerouter
