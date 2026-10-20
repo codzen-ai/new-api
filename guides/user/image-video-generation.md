@@ -10,6 +10,7 @@
 - [开始之前](#开始之前)
 - [调用流程](#调用流程)
 - [模型参数](#模型参数)
+  - [参数放在哪里](#参数放在哪里)
   - [z-image-spicy 文生图](#z-image-spicy文生图)
   - [qwen-image-edit-spicy 图生图](#qwen-image-edit-spicy图生图)
   - [wan2.2-i2v-spicy 图生视频](#wan22-i2v-spicy图生视频)
@@ -65,7 +66,7 @@ Content-Type: application/json
 
 ### 第一步：提交任务
 
-把 `model` 和该模型的参数一起放在请求体顶层：
+`model`、`prompt`、`image`、`duration` 这几个通用参数写在请求体顶层；其余参数是某个模型专属的（如 `width`、`resolution`、`seed`），一律放在 `metadata` 对象里，详见[参数放在哪里](#参数放在哪里)：
 
 ```bash
 curl -X POST "$BASE_URL/v1/video/generations" \
@@ -74,8 +75,10 @@ curl -X POST "$BASE_URL/v1/video/generations" \
   -d '{
     "model": "z-image-spicy",
     "prompt": "一只三花猫趴在洒满阳光的窗台上",
-    "width": 1024,
-    "height": 1024
+    "metadata": {
+      "width": 1024,
+      "height": 1024
+    }
   }'
 ```
 
@@ -85,15 +88,13 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 {
   "id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
   "task_id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
-  "object": "video",
   "model": "z-image-spicy",
   "status": "queued",
-  "progress": 0,
   "created_at": 1786714838
 }
 ```
 
-记下 `id`（与 `task_id` 相同），后面查询要用。
+记下 `id`（与 `task_id` 相同），后面查询要用。提交返回只有这五个字段，不含 `object` 和 `progress`；任务进度请通过查询接口获取。
 
 ### 第二步：轮询结果
 
@@ -124,20 +125,46 @@ curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
 
 ## 模型参数
 
-参数直接写在请求体顶层，和 `model` 平级。
+### 参数放在哪里
+
+请求体里的参数分两类，位置不同：
+
+| 类别 | 参数 | 位置 |
+|---|---|---|
+| 通用参数 | `model`、`prompt`、`image`、`duration` | 请求体**顶层** |
+| 模型专属参数 | 其余参数，如 `width`、`height`、`prompt_extend`、`seed`、`last_image`、`resolution` | **`metadata` 对象**里 |
+
+```json
+{
+  "model": "wan2.2-i2v-spicy",
+  "prompt": "镜头缓缓推进",
+  "image": "https://example.com/first-frame.png",
+  "duration": 8,
+  "metadata": {
+    "resolution": "720p",
+    "seed": 42
+  }
+}
+```
+
+**模型专属参数不要写在顶层**。顶层的模型专属参数不受支持，本站后续会直接忽略它们，按默认值生成和计费。例如把 `"resolution": "720p"` 写在顶层，得到的将是按 480p 生成、按 480p 计费的视频。现在就请改为写在 `metadata` 里，这个写法当前已经生效。
+
+通用参数也可以写进 `metadata`，两处同名时以 `metadata` 为准，但没有必要。
+
+下面各表的「位置」一列标明了每个参数该放哪里。
 
 ### z-image-spicy（文生图）
 
 由文字提示词生成图片。
 
-| 参数 | 类型 | 必填 | 默认 | 取值范围 | 说明 |
-|---|---|---|---|---|---|
-| `model` | string | ✅ | — | | 固定填 `z-image-spicy` |
-| `prompt` | string | ✅ | — | 非空 | 图片描述 |
-| `width` | integer | | 1024 | 256 – 1536 | 宽度（像素） |
-| `height` | integer | | 1536 | 256 – 1536 | 高度（像素） |
-| `prompt_extend` | boolean | | `true` | | 是否让模型智能改写提示词。开启通常出图更好，但会额外收费 |
-| `seed` | integer / null | | `null` | | 随机种子。同样的种子 + 同样的参数可复现同一张图；`null` 或 `0` 表示随机 |
+| 参数 | 位置 | 类型 | 必填 | 默认 | 取值范围 | 说明 |
+|---|---|---|---|---|---|---|
+| `model` | 顶层 | string | ✅ | — | | 固定填 `z-image-spicy` |
+| `prompt` | 顶层 | string | ✅ | — | 非空 | 图片描述 |
+| `width` | `metadata` | integer | | 1024 | 256 – 1536 | 宽度（像素） |
+| `height` | `metadata` | integer | | 1536 | 256 – 1536 | 高度（像素） |
+| `prompt_extend` | `metadata` | boolean | | `true` | | 是否让模型智能改写提示词。开启通常出图更好，但会额外收费 |
+| `seed` | `metadata` | integer / null | | `null` | | 随机种子。同样的种子 + 同样的参数可复现同一张图；`null` 或 `0` 表示随机 |
 
 ```bash
 curl -X POST "$BASE_URL/v1/video/generations" \
@@ -145,9 +172,11 @@ curl -X POST "$BASE_URL/v1/video/generations" \
   -d '{
     "model": "z-image-spicy",
     "prompt": "一只三花猫趴在洒满阳光的窗台上，胶片质感",
-    "width": 1024,
-    "height": 1024,
-    "prompt_extend": true
+    "metadata": {
+      "width": 1024,
+      "height": 1024,
+      "prompt_extend": true
+    }
   }'
 ```
 
@@ -155,12 +184,12 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 
 按提示词编辑一张已有图片。输出尺寸由输入图决定，没有尺寸参数。
 
-| 参数 | 类型 | 必填 | 默认 | 说明 |
-|---|---|---|---|---|
-| `model` | string | ✅ | — | 固定填 `qwen-image-edit-spicy` |
-| `image` | string | ✅ | — | 输入图片。公网可访问的 `http`/`https` 链接，或 base64 编码的图片数据 |
-| `prompt` | string | ✅ | — | 描述你想做的修改，例如「把背景换成雪山」 |
-| `seed` | integer / null | | `null` | 随机种子 |
+| 参数 | 位置 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|---|
+| `model` | 顶层 | string | ✅ | — | 固定填 `qwen-image-edit-spicy` |
+| `image` | 顶层 | string | ✅ | — | 输入图片。公网可访问的 `http`/`https` 链接，或 base64 编码的图片数据 |
+| `prompt` | 顶层 | string | ✅ | — | 描述你想做的修改，例如「把背景换成雪山」 |
+| `seed` | `metadata` | integer / null | | `null` | 随机种子 |
 
 ```bash
 curl -X POST "$BASE_URL/v1/video/generations" \
@@ -168,7 +197,10 @@ curl -X POST "$BASE_URL/v1/video/generations" \
   -d '{
     "model": "qwen-image-edit-spicy",
     "image": "https://example.com/photo.png",
-    "prompt": "把背景换成雪山，保持人物不变"
+    "prompt": "把背景换成雪山，保持人物不变",
+    "metadata": {
+      "seed": 7
+    }
   }'
 ```
 
@@ -176,16 +208,16 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 
 把一张静态图变成一段视频。
 
-| 参数 | 类型 | 必填 | 默认 | 取值范围 | 说明 |
-|---|---|---|---|---|---|
-| `model` | string | ✅ | — | | 固定填 `wan2.2-i2v-spicy` |
-| `image` | string | ✅ | — | | 首帧图片，链接或 base64 |
-| `prompt` | string | ✅ | — | 非空 | 描述镜头运动或画面变化 |
-| `last_image` | string / null | | `null` | | 尾帧图片。给了的话模型会在首尾帧之间插值 |
-| `duration` | integer | | `5` | **只能是 5 或 8** | 视频时长（秒） |
-| `resolution` | string | | `"480p"` | **只能是 `480p` 或 `720p`** | 输出分辨率 |
-| `prompt_extend` | boolean | | `true` | | 是否智能改写提示词 |
-| `seed` | integer / null | | `null` | | 随机种子 |
+| 参数 | 位置 | 类型 | 必填 | 默认 | 取值范围 | 说明 |
+|---|---|---|---|---|---|---|
+| `model` | 顶层 | string | ✅ | — | | 固定填 `wan2.2-i2v-spicy` |
+| `image` | 顶层 | string | ✅ | — | | 首帧图片，链接或 base64 |
+| `prompt` | 顶层 | string | ✅ | — | 非空 | 描述镜头运动或画面变化 |
+| `duration` | 顶层 | integer | | `5` | **只能是 5 或 8** | 视频时长（秒） |
+| `last_image` | `metadata` | string / null | | `null` | | 尾帧图片。给了的话模型会在首尾帧之间插值 |
+| `resolution` | `metadata` | string | | `"480p"` | **只能是 `480p` 或 `720p`** | 输出分辨率 |
+| `prompt_extend` | `metadata` | boolean | | `true` | | 是否智能改写提示词 |
+| `seed` | `metadata` | integer / null | | `null` | | 随机种子 |
 
 ```bash
 curl -X POST "$BASE_URL/v1/video/generations" \
@@ -195,7 +227,9 @@ curl -X POST "$BASE_URL/v1/video/generations" \
     "image": "https://example.com/first-frame.png",
     "prompt": "镜头缓缓推进，人物微笑",
     "duration": 8,
-    "resolution": "720p"
+    "metadata": {
+      "resolution": "720p"
+    }
   }'
 ```
 
@@ -330,8 +364,10 @@ curl -X POST "$BASE_URL/v1/video/generations" \
   -d '{
     "model": "z-image-spicy",
     "prompt": "一只三花猫趴在洒满阳光的窗台上",
-    "width": 1024,
-    "height": 1024
+    "metadata": {
+      "width": 1024,
+      "height": 1024
+    }
   }'
 ```
 
@@ -339,10 +375,8 @@ curl -X POST "$BASE_URL/v1/video/generations" \
 {
   "id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
   "task_id": "task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN",
-  "object": "video",
   "model": "z-image-spicy",
   "status": "queued",
-  "progress": 0,
   "created_at": 1786714838
 }
 ```
@@ -392,7 +426,9 @@ curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
   "image": "https://example.com/first-frame.png",
   "prompt": "镜头缓缓推进",
   "duration": 8,
-  "resolution": "720p"
+  "metadata": {
+    "resolution": "720p"
+  }
 }'
 ```
 
@@ -408,4 +444,4 @@ curl "$BASE_URL/v1/video/generations/task_uokagkWjYst2Y1KW0B9MvVJdgPAov2jN" \
 
 **图片输入**：`image` 和 `last_image` 支持公网链接或 base64。用链接时确保生成服务能访问到——内网地址、需要登录才能打开的链接都会导致任务失败。base64 建议不超过 10 MB。
 
-**参数位置**：所有参数写在请求体**顶层**，和 `model` 平级。也可以放在 `metadata` 对象里（两处同名时以 `metadata` 为准），但没有必要。
+**参数位置**：`model`、`prompt`、`image`、`duration` 写在请求体顶层，其余模型专属参数（`width`、`height`、`prompt_extend`、`seed`、`last_image`、`resolution`）写在 `metadata` 对象里。写在顶层的模型专属参数不受支持，见[参数放在哪里](#参数放在哪里)。
