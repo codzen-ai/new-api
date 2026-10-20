@@ -25,11 +25,16 @@ MuleRouter 渠道的正确性有一半不在 new-api 里：上游响应体的字
 | 环境变量 | 命令行参数 | 用途 | 从哪来 |
 |---|---|---|---|
 | `NEW_API_BASE_URL` | `--base-url` | 实例地址，默认 `http://localhost:3000` | 本地开发通常不用改 |
-| `NEW_API_KEY` | `--api-key` | 中转令牌（`sk-` 开头） | 后台「令牌」页面新建 |
-| `NEW_API_ADMIN_TOKEN` | `--admin-token` | 管理员访问令牌，用来读 `/api/pricing`、`/api/log/`、`/api/user/self` | 后台「个人设置 → 访问令牌」 |
+| `NEW_API_KEY` | `--api-key` | 中转令牌（`sk-` 开头），决定请求落到哪个分组、哪个渠道 | 后台「令牌」页面新建 |
+| `NEW_API_ACCESS_TOKEN` | `--access-token` | 令牌主人的访问令牌，用来读这个账号的 `/api/pricing`、`/api/log/self`、`/api/user/self` | 后台「个人设置 → 访问令牌」 |
+| `NEW_API_USER_ID` | `--user-id` | 令牌主人的用户 id，随访问令牌放进 `New-API-User` 头 | 登录方式下自动取 |
+| `NEW_API_USERNAME` / `NEW_API_PASSWORD` | `--username` / `--password` | 没有访问令牌时登录取 JWT 代替 | 测试账号的用户名和密码 |
+| `MULEROUTER_TEST_GROUP` | `--group` | 请求应落到的分组 | 默认取账号的用户分组；令牌自己设了分组时必须给 |
 | `MULEROUTER_TEST_IMAGE_URL` | `--image-url` | 图生图/图生视频的输入图 | 可选，不给就用 z-image 用例的产出 |
 
-如果这些还没准备好，先问清楚再动手 —— 把管理员令牌当中转令牌用会得到一个含义不明的 401，比直接问更浪费时间。
+**选中要测的渠道靠令牌和分组**：渠道按分组划给用户，所以测哪个渠道，就用那个分组里账号的中转令牌，访问令牌（或用户名密码）也必须是**同一个账号**的 —— 价格和分组倍率按账号算，消费日志按令牌名筛，余额对账看的也是这个账号。测插件渠道时，用测试分组里的测试账号；staging 的测试账号见主仓库 `.local-tests/staging-test-accounts.md`（只在本地，密钥在仓库根目录 `.env`）。
+
+如果这些还没准备好，先问清楚再动手 —— 把访问令牌当中转令牌用会得到一个含义不明的 401，比直接问更浪费时间。
 
 前置条件是渠道已经建好并且模型配了**固定价格**（不是倍率）。异步任务按次计费，配成倍率会走 token 结算路径，本 skill 的金额断言就没有意义了 —— 预检会直接拦住这种情况。
 
@@ -43,8 +48,8 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 这一步跑预检和护栏检查，一分钱不花：
 
-- **预检**读 `/api/pricing` 确认每个待测模型都配了固定价格、价格不低于上游成本价，读分组倍率和当前余额，列出本轮预算；
-- **护栏检查**发七个应当被拒的请求（未声明的 `n`、枚举外的 `duration`、包装过的巨大整数、越界的 `width`、未登记的模型、厂商原生路径、无令牌），然后**比对护栏前后的余额**——没变才说明这些请求确实死在扣费之前。
+- **预检**读该账号的 `/api/pricing`，确认每个待测模型在目标分组里有渠道、配了固定价格、价格不低于上游成本价，读分组倍率和当前余额，列出本轮预算；
+- **护栏检查**发七个应当被拒的请求（`metadata` 里未声明的 `n`、枚举外的 `duration`、包装过的巨大整数、`metadata` 里越界的 `width`、未登记的模型、厂商原生路径、无令牌），然后**比对护栏前后的余额**——没变才说明这些请求确实死在扣费之前。
 
 把预算念给用户听，再问要不要继续。任何护栏失败都先停下来查，别急着花钱。
 
@@ -62,13 +67,15 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 --cases z-image,qwen-edit,wan-480p,wan-720p-8s   # 加上最贵档，$0.47
 ```
 
+用例把 Vendor parameter（`width`、`height`、`prompt_extend`、`resolution`）放在 `metadata` 下，统一字段（`prompt`、`image`、`duration`）留在顶层：插件渠道会丢掉顶层的 Vendor parameter，Go 渠道两种写法都认，所以同一套用例在两种渠道上期望倍率相同。新加用例照这个写。
+
 需要输入图的用例（`qwen-edit`、`wan-*`）会自动排到后面，用前面 z-image 的产出当输入。想固定输入图就传 `--image-url`。
 
 单个用例的链路是：提交 → 断言 200 和本站任务 ID → 轮询到终态 → 读消费日志 → 复算扣费。视频用例慢，`--poll-timeout` 默认 600 秒。
 
 ### 第 3 步：读结果
 
-每个用例七项断言，完整数据写进 `--out`（默认 `/tmp/mulerouter-smoke-report.json`）：
+每个用例八项断言，完整数据写进 `--out`（默认 `/tmp/mulerouter-smoke-report.json`）：
 
 | 断言 | 检查什么 | 失败意味着 |
 |---|---|---|
@@ -79,6 +86,7 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 | `task_completed` | 轮询到 `SUCCESS` | 上游失败，或响应体形状和假设不符 |
 | `artifact_url` / `artifact_type` | `result_url` 是可用 URL 且扩展名符合模型的产物类型 | 产物解析和假设不符 |
 | `quota_charged` | 扣费 == `固定价 × 倍率 × 分组倍率 × QuotaPerUnit` | 计费链路和预期不符 |
+| `group_routed` | 消费日志的分组 == 目标分组 | 请求没落到目标分组的渠道上，测的不是你想测的渠道 |
 
 `quota_charged` 的复算刻意分两步取整（先把按次价折成基础额度，再乘倍率），因为 `relay_task.go` 就是这么算的，合成一次乘法会差 1 个额度。断言留了 ±1 容差吸收浮点误差 —— 数量级错误照样会被抓到。
 
@@ -90,29 +98,44 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 1. **护栏结论**先说 —— 这是安全性结论，比功能可用性更重要。全过就一句话带过。
 2. **每个用例一行**：用例、任务 ID、终态、实际扣费 vs 预期扣费、通过/失败。
-3. **失败项的定性**：是链路不通、形状不符，还是金额不对。这三类的修复位置完全不同：链路问题看渠道配置和路由表，形状问题改 `relay/channel/task/mulerouter/dto.go`，金额问题查渠道的 `billing_vars` 和模型固定价格。
+3. **失败项的定性**：是链路不通、形状不符，还是金额不对。这三类的修复位置完全不同：链路问题看渠道配置和端点表，形状问题看响应解析，金额问题看计费声明和模型固定价格。这些东西在哪，取决于渠道类型，见下面「修复位置」。
 4. **本轮花费**和余额对账结果。
 5. **哪些用例没跑** —— 明确说出来。没跑的模型不算验证通过，尤其默认用例只覆盖每个模型一档。
 
 全过就直接说通过，不要为了显得严谨而制造疑虑。
 
+## 修复位置
+
+MuleRouter 有两种渠道，同一个概念落在不同地方。排障里的「端点表」「计费声明」「响应解析」按渠道类型找：
+
+| 概念 | 插件渠道（MuleRouter 插件） | Go 渠道 |
+|---|---|---|
+| 端点表 | `plugins/tasks/mulerouter/plugin.js` 的 `ENDPOINTS` 表（键即三段式名字） | 渠道设置 `settings.mulerouter` 的路由 |
+| 计费声明 | 同一张 `ENDPOINTS` 表里每个端点的 `billing` | 同一份路由里的 `billing_vars` |
+| 成本字段黑名单 | `plugin.js` 的 `COST_FIELDS` | `relaykit/dto/mulerouter_settings.go` 的 `muleRouterCostParams` |
+| 响应解析 | `plugin.js` 的 `parseSubmitResponse` / `parseTaskResult` | `relay/channel/task/mulerouter/dto.go` 和 `ParseTaskResult` |
+
+插件渠道改的是代码，改完要重新部署；Go 渠道的端点表和计费声明是渠道配置，后台改了就生效。
+
 ## 排障
 
 **提交 400 `model_price_error` / 「模型倍率未配置」** —— 模型没配固定价格。预检本该拦住，说明跑的时候跳过了预检。
 
-**提交 503「无可用渠道」** —— 渠道的模型列表里没有这个名字。客户端用的是短名（`z-image-spicy`），渠道需要同时配好模型列表和「模型重定向」把短名映射到三段式内部名 `{vendor}/{model}/{action}`。
+**提交 503「无可用渠道」** —— 目标分组里没有渠道提供这个名字（报错里带着分组名，先确认分组对不对），或渠道的模型列表里没有这个名字。客户端用的是短名（`z-image-spicy`），渠道需要同时配好模型列表和「模型重定向」把短名映射到三段式内部名 `{vendor}/{model}/{action}`。
 
-**提交 404 `model_not_found`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在路由表里。检查两者是否对齐。
+**提交 404 `model_not_found`，或插件渠道报 `this model is not available on this channel`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在端点表里。检查两者是否对齐。
 
-**提交 400 且报某个字段"影响成本但未声明"** —— 请求里带了成本字段黑名单里的键（`n`/`duration`/`resolution`/`size`/`width`/`height` 等）而路由的 `billing_vars` 没声明它。这是设计行为不是 bug：给它加一条带上界的声明，或者别传这个字段。
+**提交 400 且报某个字段"影响成本但未声明"** —— 请求里（顶层或 `metadata` 里）带了成本字段黑名单里的键（`n`/`duration`/`resolution`/`size`/`width`/`height` 等）而该 endpoint 没声明它。这是设计行为不是 bug：在计费声明里给它加一条带上界的声明，或者别传这个字段。
 
-**提交成功但轮询一直 `pending`** —— 先看后端日志有没有 `unknown task status`。有的话说明上游状态值超出了 `pending/processing/completed/failed` 四种，需要在 `ParseTaskResult` 里补映射。没有的话就是上游确实在排队。
+**提交成功但轮询一直 `pending`** —— 先看后端日志有没有 `unknown task status`。有的话说明上游状态值超出了 `pending/processing/completed/failed` 四种，需要在响应解析里补映射（插件渠道是 `plugin.js` 的 `TASK_STATUSES`）。没有的话就是上游确实在排队。
 
-**提交返回 `invalid_upstream_response`（没有 task id）** —— 上游 202 响应体的形状和文档不符。把原始响应贴出来，对着改 `relay/channel/task/mulerouter/dto.go` 的 `taskResponse`。
+**提交返回 `invalid_upstream_response`（没有 task id）** —— 上游 202 响应体的形状和文档不符。把原始响应贴出来，对着改响应解析（插件渠道是 `parseSubmitResponse`，Go 渠道是 `dto.go` 的 `taskResponse`）。
 
-**`billing_ratios` 拿到空表** —— 该用例期望的倍率本来就是空（`qwen-edit` 没有计费变量），这是正常的；如果 z-image 或 wan 拿到空表，说明 `billing_vars` 没配。
+**`billing_ratios` 拿到空表** —— 该用例期望的倍率本来就是空（`qwen-edit` 没有计费变量），这是正常的；如果 z-image 或 wan 拿到空表，说明计费声明里没有这个端点的计费字段，或 Vendor parameter 写在了顶层、被插件渠道丢掉后按默认值计费。
 
 **额度对不上但每个用例都 PASS** —— 测试期间有其他请求在消费同一个账号。换一个专用账号重跑。
+
+**`group_routed` 失败** —— 令牌自己设了分组（或是 `auto` 分组），请求没走 `--group` 指的分组。换一个分组就是目标分组的令牌重跑；扣费结论对那个分组不成立。
 
 ## 上游价目
 
