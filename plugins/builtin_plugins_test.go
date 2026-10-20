@@ -15,7 +15,8 @@ import (
 var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "mulerouter", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
 
 // responsesKeys are the built-in plugins that claim openai_responses. mulerouter
-// claims no host protocol: clients reach it only through the unified task route.
+// claims only openai_video: clients reach it through POST /v1/tasks/mulerouter
+// and, for videos, POST /v1/videos.
 var responsesKeys = slices.DeleteFunc(slices.Clone(expectedKeys), func(key string) bool { return key == "mulerouter" })
 
 func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing.T) {
