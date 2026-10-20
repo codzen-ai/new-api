@@ -98,11 +98,24 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 1. **护栏结论**先说 —— 这是安全性结论，比功能可用性更重要。全过就一句话带过。
 2. **每个用例一行**：用例、任务 ID、终态、实际扣费 vs 预期扣费、通过/失败。
-3. **失败项的定性**：是链路不通、形状不符，还是金额不对。这三类的修复位置完全不同：链路问题看渠道配置和路由表，形状问题改 `relay/channel/task/mulerouter/dto.go`，金额问题查渠道的 `billing_vars` 和模型固定价格。
+3. **失败项的定性**：是链路不通、形状不符，还是金额不对。这三类的修复位置完全不同：链路问题看渠道配置和端点表，形状问题看响应解析，金额问题看计费声明和模型固定价格。这些东西在哪，取决于渠道类型，见下面「修复位置」。
 4. **本轮花费**和余额对账结果。
 5. **哪些用例没跑** —— 明确说出来。没跑的模型不算验证通过，尤其默认用例只覆盖每个模型一档。
 
 全过就直接说通过，不要为了显得严谨而制造疑虑。
+
+## 修复位置
+
+MuleRouter 有两种渠道，同一个概念落在不同地方。排障里的「端点表」「计费声明」「响应解析」按渠道类型找：
+
+| 概念 | 插件渠道（MuleRouter 插件） | Go 渠道 |
+|---|---|---|
+| 端点表 | `plugins/tasks/mulerouter/plugin.js` 的 `ENDPOINTS` 表（键即三段式名字） | 渠道设置 `settings.mulerouter` 的路由 |
+| 计费声明 | 同一张 `ENDPOINTS` 表里每个端点的 `billing` | 同一份路由里的 `billing_vars` |
+| 成本字段黑名单 | `plugin.js` 的 `COST_FIELDS` | `relaykit/dto/mulerouter_settings.go` 的 `muleRouterCostParams` |
+| 响应解析 | `plugin.js` 的 `parseSubmitResponse` / `parseTaskResult` | `relay/channel/task/mulerouter/dto.go` 和 `ParseTaskResult` |
+
+插件渠道改的是代码，改完要重新部署；Go 渠道的端点表和计费声明是渠道配置，后台改了就生效。
 
 ## 排障
 
@@ -110,15 +123,15 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 **提交 503「无可用渠道」** —— 目标分组里没有渠道提供这个名字（报错里带着分组名，先确认分组对不对），或渠道的模型列表里没有这个名字。客户端用的是短名（`z-image-spicy`），渠道需要同时配好模型列表和「模型重定向」把短名映射到三段式内部名 `{vendor}/{model}/{action}`。
 
-**提交 404 `model_not_found`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在路由表里。检查两者是否对齐。
+**提交 404 `model_not_found`，或插件渠道报 `this model is not available on this channel`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在端点表里。检查两者是否对齐。
 
-**提交 400 且报某个字段"影响成本但未声明"** —— 请求里（顶层或 `metadata` 里）带了成本字段黑名单里的键（`n`/`duration`/`resolution`/`size`/`width`/`height` 等）而该 endpoint 没声明它。这是设计行为不是 bug：给它加一条带上界的声明，或者别传这个字段。
+**提交 400 且报某个字段"影响成本但未声明"** —— 请求里（顶层或 `metadata` 里）带了成本字段黑名单里的键（`n`/`duration`/`resolution`/`size`/`width`/`height` 等）而该 endpoint 没声明它。这是设计行为不是 bug：在计费声明里给它加一条带上界的声明，或者别传这个字段。
 
-**提交成功但轮询一直 `pending`** —— 先看后端日志有没有 `unknown task status`。有的话说明上游状态值超出了 `pending/processing/completed/failed` 四种，需要在 `ParseTaskResult` 里补映射。没有的话就是上游确实在排队。
+**提交成功但轮询一直 `pending`** —— 先看后端日志有没有 `unknown task status`。有的话说明上游状态值超出了 `pending/processing/completed/failed` 四种，需要在响应解析里补映射（插件渠道是 `plugin.js` 的 `TASK_STATUSES`）。没有的话就是上游确实在排队。
 
-**提交返回 `invalid_upstream_response`（没有 task id）** —— 上游 202 响应体的形状和文档不符。把原始响应贴出来，对着改 `relay/channel/task/mulerouter/dto.go` 的 `taskResponse`。
+**提交返回 `invalid_upstream_response`（没有 task id）** —— 上游 202 响应体的形状和文档不符。把原始响应贴出来，对着改响应解析（插件渠道是 `parseSubmitResponse`，Go 渠道是 `dto.go` 的 `taskResponse`）。
 
-**`billing_ratios` 拿到空表** —— 该用例期望的倍率本来就是空（`qwen-edit` 没有计费变量），这是正常的；如果 z-image 或 wan 拿到空表，说明 `billing_vars` 没配，或 Vendor parameter 写在了顶层、被插件渠道丢掉后按默认值计费。
+**`billing_ratios` 拿到空表** —— 该用例期望的倍率本来就是空（`qwen-edit` 没有计费变量），这是正常的；如果 z-image 或 wan 拿到空表，说明计费声明里没有这个端点的计费字段，或 Vendor parameter 写在了顶层、被插件渠道丢掉后按默认值计费。
 
 **额度对不上但每个用例都 PASS** —— 测试期间有其他请求在消费同一个账号。换一个专用账号重跑。
 

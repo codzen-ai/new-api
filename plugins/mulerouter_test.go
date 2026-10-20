@@ -153,10 +153,14 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 	)
 
 	// The host hands the plugin its own re-encoding of the request, so a few
-	// inputs cannot reach the plugin as the client wrote them. pluginUpload is
-	// the body the plugin sends instead of Go's when that does not change the
-	// price; pluginReject is the refusal the plugin answers with when it
-	// cannot charge what Go charges and refuses rather than guess.
+	// inputs cannot reach the plugin as the client wrote them. These are known
+	// host-caused differences, recorded per case:
+	// - pluginUpload is the body the plugin sends instead of Go's.
+	// - pluginRatios, with pluginUpload, is what the plugin bills for a
+	//   request Go refuses: the host drops a top-level duration it cannot
+	//   decode into an integer (5.5, "eight", 0), so the plugin sees no
+	//   duration, bills the 5-second default and sends none upstream.
+	// - pluginReject is the refusal the plugin answers with instead of Go's.
 	cases := []struct {
 		name         string
 		model        string
@@ -166,6 +170,7 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 		ratios       map[string]float64
 		reject       string
 		pluginUpload map[string]any
+		pluginRatios map[string]float64
 		pluginReject string
 	}{
 		{
@@ -351,36 +356,50 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 			pluginUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": float64(8)},
 		},
 		{
-			// The host drops an absent top-level duration and one it cannot read
-			// alike, so the plugin cannot bill Go's 5-second default safely.
-			name:         "wan2.2 omitted duration",
+			name:   "wan2.2 omitted duration bills 5 seconds",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png"}`,
+			url:    wanVideo,
+			upload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			ratios: map[string]float64{"seconds": 5, "resolution": 1},
+		},
+		{
+			// The host's request bounds refuse a null duration at any depth
+			// before the plugin runs; Go bills it as the default.
+			name:         "wan2.2 null duration in metadata",
 			model:        "wan2.2-i2v-spicy",
-			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png"}`,
+			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":{"duration":null}}`,
 			url:          wanVideo,
-			upload:       map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			upload:       map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": nil},
 			ratios:       map[string]float64{"seconds": 5, "resolution": 1},
-			pluginReject: "duration must be given as an integer, allowed: 5, 8",
+			pluginReject: "plugin usage value must be a number",
 		},
 		{
 			name:         "wan2.2 fractional top-level duration",
 			model:        "wan2.2-i2v-spicy",
 			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5.5}`,
+			url:          wanVideo,
 			reject:       "duration must be an integer, got 5.5",
-			pluginReject: "duration must be given as an integer, allowed: 5, 8",
+			pluginUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			pluginRatios: map[string]float64{"seconds": 5, "resolution": 1},
 		},
 		{
 			name:         "wan2.2 top-level duration that is not a number",
 			model:        "wan2.2-i2v-spicy",
 			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":"eight"}`,
+			url:          wanVideo,
 			reject:       `invalid value for duration: "eight" is not a number`,
-			pluginReject: "duration must be given as an integer, allowed: 5, 8",
+			pluginUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			pluginRatios: map[string]float64{"seconds": 5, "resolution": 1},
 		},
 		{
 			name:         "wan2.2 top-level duration 0",
 			model:        "wan2.2-i2v-spicy",
 			body:         `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":0}`,
+			url:          wanVideo,
 			reject:       "invalid value 0 for duration, allowed: 5, 8",
-			pluginReject: "duration must be given as an integer, allowed: 5, 8",
+			pluginUpload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png"},
+			pluginRatios: map[string]float64{"seconds": 5, "resolution": 1},
 		},
 		{
 			name:   "wan2.2 fractional duration in metadata",
@@ -412,6 +431,11 @@ func TestMulerouterPluginMatchesGoAdaptor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			goSubmission := submitThroughGoMulerouter(t, tc.model, tc.body)
 			pluginSubmission := submitThroughMulerouterPlugin(t, plugin, tc.model, tc.body)
+			if tc.pluginRatios != nil {
+				assert.Equal(t, tc.reject, goSubmission.Rejection)
+				assert.Equal(t, mulerouterSubmission{URL: tc.url, Body: tc.pluginUpload, Ratios: tc.pluginRatios}, pluginSubmission)
+				return
+			}
 			pluginReject := tc.pluginReject
 			if pluginReject == "" {
 				pluginReject = tc.reject
