@@ -61,9 +61,7 @@ const (
 	ChannelTypeTaskPlugin     = 61
 	ChannelTypeVLLM           = 62
 	ChannelTypeSGLang         = 63
-	// 64 was ChannelTypeMuleRouter, removed with the MuleRouter Go adaptor
-	// (docs/adr/0001); the value stays reserved, do not reuse it.
-	ChannelTypeDummy // this one is only for count, do not add any channel after this
+	ChannelTypeDummy          // this one is only for count, do not add any channel after this
 
 )
 
