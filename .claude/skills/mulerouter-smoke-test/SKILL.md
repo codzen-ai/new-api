@@ -1,14 +1,13 @@
 ---
 name: mulerouter-smoke-test
-description: Smoke-test a new-api instance's MuleRouter channel end to end — submit, poll, verify the response shape, the artifacts, the billing multipliers and the charged quota for the spicy image and video models (z-image-spicy, qwen-image-edit-spicy, wan2.2-i2v-spicy). Use this whenever the user wants to test, verify, validate or debug a MuleRouter / carrothub / spicy channel on a running instance — including phrasings like "测一下 MuleRouter 渠道", "验证 carrothub 配置对不对", "跑一下冒烟测试", "调用本地接口测试刚创建的模型", "check the image/video generation models work", or when they have just created a MuleRouter channel and want to confirm it relays correctly. Also use it when a MuleRouter request fails, returns an unexpected status, or charges an amount that looks wrong, and you need evidence from a live run.
+description: Smoke-test a new-api instance's MuleRouter channel (a Task Plugin channel bound to the `mulerouter` plugin) end to end — submit, poll, verify the response shape, the artifacts, the billing multipliers and the charged quota for the spicy image and video models (z-image-spicy, qwen-image-edit-spicy, wan2.2-i2v-spicy). Use this whenever the user wants to test, verify, validate or debug a MuleRouter / carrothub / spicy channel on a running instance — including phrasings like "测一下 MuleRouter 渠道", "验证 carrothub 配置对不对", "跑一下冒烟测试", "调用本地接口测试刚创建的模型", "check the image/video generation models work", or when they have just created a MuleRouter channel and want to confirm it relays correctly. Also use it when a MuleRouter request fails, returns an unexpected status, or charges an amount that looks wrong, and you need evidence from a live run.
 ---
 
 # MuleRouter 渠道联调
 
-这个 skill 验证一个跑着的 new-api 实例的 MuleRouter 渠道是否真的能用。它回答三个问题，重要性递减：
+这个 skill 验证一个跑着的 new-api 实例的 MuleRouter 渠道（绑定 `mulerouter` 插件的任务插件渠道）是否真的能用。它回答三个问题，重要性递减：
 
 1. **护栏还在吗** —— 未声明的成本字段、越界的计费乘数、未登记的模型，是否都在扣费之前被拒；
-   厂商原生路径是否确实对客户端不可达；
 2. **链路通不通** —— 提交能不能拿到本站任务 ID，轮询能不能推到 `SUCCESS`，产物能不能下载；
 3. **钱扣得对不对** —— 实际扣费是否等于 `固定价 × 倍率 × 分组倍率`。
 
@@ -51,7 +50,7 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 这一步跑预检和护栏检查，一分钱不花：
 
 - **预检**读该账号的 `/api/pricing`，确认每个待测模型在目标分组里有渠道、配了固定价格、价格不低于上游成本价，读分组倍率和当前余额，列出本轮预算；
-- **护栏检查**发七个应当被拒的请求（`metadata` 里未声明的 `n`、枚举外的 `duration`、包装过的巨大整数、`metadata` 里越界的 `width`、未登记的模型、厂商原生路径、无令牌），然后**比对护栏前后的余额**——没变才说明这些请求确实死在扣费之前。
+- **护栏检查**向 `/v1/tasks/mulerouter` 发六个应当被拒的请求（`metadata` 里未声明的 `n`、枚举外的 `duration`、包装过的巨大整数、`metadata` 里越界的 `width`、未登记的模型、无令牌），然后**比对护栏前后的余额**——没变才说明这些请求确实死在扣费之前。
 
 把预算念给用户听，再问要不要继续。任何护栏失败都先停下来查，别急着花钱。
 
@@ -101,7 +100,7 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 1. **护栏结论**先说 —— 这是安全性结论，比功能可用性更重要。全过就一句话带过。
 2. **每个用例一行**：用例、任务 ID、终态、实际扣费 vs 预期扣费、通过/失败。
-3. **失败项的定性**：是链路不通、形状不符，还是金额不对。这三类的修复位置完全不同：链路问题看渠道配置和端点表，形状问题看响应解析，金额问题看计费声明和模型固定价格。这些东西在哪，取决于渠道类型，见下面「修复位置」。
+3. **失败项的定性**：是链路不通、形状不符，还是金额不对。这三类的修复位置完全不同：链路问题看渠道配置和端点表，形状问题看响应解析，金额问题看计费声明和模型固定价格。位置见下面「修复位置」。
 4. **本轮花费**和余额对账结果。
 5. **哪些用例没跑** —— 明确说出来。没跑的模型不算验证通过，尤其默认用例只覆盖每个模型一档。
 
@@ -109,17 +108,17 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 ## 修复位置
 
-MuleRouter 有两种渠道，同一个概念落在不同地方。排障里的「端点表」「计费声明」「响应解析」按渠道类型找：
+排障里的「端点表」「计费声明」「响应解析」都在 `plugins/tasks/mulerouter/plugin.js` 里：
 
-| 概念 | 插件渠道（MuleRouter 插件） | Go 渠道 |
-|---|---|---|
-| 端点表 | `plugins/tasks/mulerouter/plugin.js` 的 `ENDPOINTS` 表（键即三段式名字） | 渠道设置 `settings.mulerouter` 的路由 |
-| 计费声明 | 同一张 `ENDPOINTS` 表里每个端点的 `billing` | 同一份路由里的 `billing_vars` |
-| 成本字段黑名单 | `plugin.js` 的 `COST_FIELDS` | `relaykit/dto/mulerouter_settings.go` 的 `muleRouterCostParams` |
-| 响应解析 | `plugin.js` 的 `parseSubmitResponse` / `parseTaskResult` | `relay/channel/task/mulerouter/dto.go` 和 `ParseTaskResult` |
-| 产物 | `plugin.js` 的 `listArtifacts` / `buildContentRequest` | 任务的 `result_url` |
+| 概念 | 位置 |
+|---|---|
+| 端点表 | `ENDPOINTS` 表（键即 MuleRouter model name `{vendor}/{model}/{action}`） |
+| 计费声明 | 同一张 `ENDPOINTS` 表里每个端点的 `billing` |
+| 成本字段黑名单 | `COST_FIELDS` |
+| 响应解析 | `parseSubmitResponse` / `parseTaskResult` / `TASK_STATUSES` |
+| 产物 | `listArtifacts` / `buildContentRequest` |
 
-插件渠道改的是代码，改完要重新部署；Go 渠道的端点表和计费声明是渠道配置，后台改了就生效。
+这些是代码，改完要重新部署（见 [ADR-0001](../../../docs/adr/0001-mulerouter-endpoints-live-in-a-task-plugin.md)）。渠道上能改的只有模型列表、「模型重定向」、Base URL 和密钥；价格在模型固定价格里。
 
 ## 排障
 
@@ -127,13 +126,13 @@ MuleRouter 有两种渠道，同一个概念落在不同地方。排障里的「
 
 **提交 503「无可用渠道」** —— 先确认提交地址是 `/v1/tasks/mulerouter`：`/v1/video/generations` 到不了插件渠道。地址对的话，是目标分组里没有绑定 `mulerouter` 插件的渠道提供这个名字（报错里带着分组名，先确认分组对不对），或渠道的模型列表里没有这个名字。客户端用的是短名（`z-image-spicy`），渠道需要同时配好模型列表和「模型重定向」把短名映射到三段式内部名 `{vendor}/{model}/{action}`。
 
-**提交 404 `model_not_found`，或插件渠道报 `this model is not available on this channel`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在端点表里。检查两者是否对齐。
+**提交报 `this model is not available on this channel`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在端点表里。检查两者是否对齐。
 
 **提交 400 且报某个字段"影响成本但未声明"** —— 请求里（顶层或 `metadata` 里）带了成本字段黑名单里的键（`n`/`duration`/`resolution`/`size`/`width`/`height` 等）而该 endpoint 没声明它。这是设计行为不是 bug：在计费声明里给它加一条带上界的声明，或者别传这个字段。
 
-**提交成功但轮询一直 `pending`** —— 先看后端日志有没有 `unknown task status`。有的话说明上游状态值超出了 `pending/processing/completed/failed` 四种，需要在响应解析里补映射（插件渠道是 `plugin.js` 的 `TASK_STATUSES`）。没有的话就是上游确实在排队。
+**提交成功但轮询一直 `pending`** —— 先看后端日志有没有 `unknown task status`。有的话说明上游状态值超出了 `pending/processing/completed/failed` 四种，需要在 `plugin.js` 的 `TASK_STATUSES` 里补映射。没有的话就是上游确实在排队。
 
-**提交返回 `invalid_upstream_response`（没有 task id）** —— 上游 202 响应体的形状和文档不符。把原始响应贴出来，对着改响应解析（插件渠道是 `parseSubmitResponse`，Go 渠道是 `dto.go` 的 `taskResponse`）。
+**提交返回 `invalid_upstream_response`（没有 task id）** —— 上游 202 响应体的形状和文档不符。把原始响应贴出来，对着改 `plugin.js` 的 `parseSubmitResponse`。
 
 **`billing_ratios` 拿到空表** —— 该用例期望的倍率本来就是空（`qwen-edit` 没有计费变量），这是正常的；如果 z-image 或 wan 拿到空表，说明计费声明里没有这个端点的计费字段。
 
@@ -143,4 +142,4 @@ MuleRouter 有两种渠道，同一个概念落在不同地方。排障里的「
 
 ## 上游价目
 
-脚本内置的 `UPSTREAM_BASE_PRICE` 是上游基准单位价（图片按张 $0.04 / $0.013，视频按秒 $0.02），只用于预检时警告"配置价低于成本价"，不参与断言 —— 加价多少是运营决策。上游调价后同步更新那个表，方案文档 `specifications/implemented/mulerouter-async-task-gateway.md` 第 9 节有价目来源。
+脚本内置的 `UPSTREAM_BASE_PRICE` 是上游基准单位价（图片按张 $0.04 / $0.013，视频按秒 $0.02），只用于预检时警告"配置价低于成本价"，不参与断言 —— 加价多少是运营决策。上游调价后同步更新那个表，原方案文档 `specifications/implemented/mulerouter-async-task-gateway.md` 第 9 节有价目来源（该文档的设计已被 ADR-0001 取代，价目仍可参考）。

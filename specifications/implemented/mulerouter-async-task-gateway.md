@@ -1,3 +1,5 @@
+> **已被取代**：本方案的设计已被 [ADR-0001](../../docs/adr/0001-mulerouter-endpoints-live-in-a-task-plugin.md) 取代。MuleRouter endpoint 现在写在任务插件 `mulerouter`（`plugins/tasks/mulerouter/plugin.js`）的代码里，MuleRouter 渠道类型、渠道路由表、`billing_vars` 和 `/vendors/...` 入口均已删除。本文只作历史记录，不要照本文配置或恢复；当前的配置方式见 [MuleRouter 渠道配置说明](../../guides/admin/mulerouter-channel-setup.md)。
+
 # MuleRouter 异步任务网关接入方案
 
 > 目标：让 new-api 转发 MuleRouter `/vendors/{vendor}/v1/...` 下的异步生成类 API，
