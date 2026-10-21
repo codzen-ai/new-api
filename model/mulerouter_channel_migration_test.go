@@ -83,7 +83,7 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 	// address, so a moved channel and a newly bound one reach the same vendor.
 	plugin, found := jsplugin.DefaultRegistry.Generation().Get(muleRouterPluginKey)
 	require.True(t, found)
-	require.Equal(t, defaultBaseURL, constant.GetChannelBaseURL(constant.ChannelTypeMuleRouter))
+	require.Equal(t, defaultBaseURL, goMuleRouterBaseURL)
 	require.Equal(t, defaultBaseURL, plugin.Meta.BaseURL)
 
 	setting := `{"proxy":"http://proxy:8080","http_protocol":"http1"}`
@@ -118,18 +118,18 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		"loop":"carrothub/wan2.2-i2v-spicy/generation","carrothub/wan2.2-i2v-spicy/generation":"loop"}`
 	channels := []*Channel{
 		{
-			Id: 1, Type: constant.ChannelTypeMuleRouter, Name: "mulerouter", Key: "sk-mule", Status: common.ChannelStatusEnabled,
+			Id: 1, Type: goMuleRouterChannelType, Name: "mulerouter", Key: "sk-mule", Status: common.ChannelStatusEnabled,
 			BaseURL: &baseURL, Models: "z-image-spicy,wan2.2-i2v-spicy", Group: "default,vip", ModelMapping: &mapping,
 			Weight: &weight, Priority: &priority, Setting: &setting, OtherSettings: muleRouterSettings(muleRouterStagingRoutes),
 		},
 		{Id: 2, Type: constant.ChannelTypeTaskPlugin, Name: "legacy mulerouter", Key: "sk-legacy", OtherSettings: `{"mulerouter":` + muleRouterStagingRoutes + `}`},
-		{Id: 11, Type: constant.ChannelTypeMuleRouter, Name: "blank base URL", Key: "sk-11", BaseURL: &blankBaseURL, OtherSettings: muleRouterSettings(muleRouterStagingRoutes)},
+		{Id: 11, Type: goMuleRouterChannelType, Name: "blank base URL", Key: "sk-11", BaseURL: &blankBaseURL, OtherSettings: muleRouterSettings(muleRouterStagingRoutes)},
 		{Id: 3, Type: constant.ChannelTypeTaskPlugin, Name: "sora", Key: "sk-sora", Setting: &soraSetting, OtherSettings: `{}`},
-		{Id: 4, Type: constant.ChannelTypeMuleRouter, Name: "undeclared endpoint", Key: "sk-4", OtherSettings: muleRouterSettings(undeclared)},
-		{Id: 5, Type: constant.ChannelTypeMuleRouter, Name: "repriced endpoint", Key: "sk-5", OtherSettings: muleRouterSettings(repriced)},
+		{Id: 4, Type: goMuleRouterChannelType, Name: "undeclared endpoint", Key: "sk-4", OtherSettings: muleRouterSettings(undeclared)},
+		{Id: 5, Type: goMuleRouterChannelType, Name: "repriced endpoint", Key: "sk-5", OtherSettings: muleRouterSettings(repriced)},
 		{Id: 6, Type: constant.ChannelTypeTaskPlugin, Name: "legacy repriced", Key: "sk-6", OtherSettings: muleRouterSettings(repriced)},
 		{
-			Id: 7, Type: constant.ChannelTypeMuleRouter, Name: "chained mapping outside the route table", Key: "sk-7",
+			Id: 7, Type: goMuleRouterChannelType, Name: "chained mapping outside the route table", Key: "sk-7",
 			Models: "z-image,edit", ModelMapping: &chainedMapping, OtherSettings: muleRouterSettings(zImageOnly),
 		},
 		{
@@ -137,11 +137,11 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 			Models: "carrothub/z-image-spicy/generation,carrothub/wan2.2-i2v-spicy/generation", OtherSettings: muleRouterSettings(zImageOnly),
 		},
 		{
-			Id: 9, Type: constant.ChannelTypeMuleRouter, Name: "suffixed model outside the route table", Key: "sk-9",
+			Id: 9, Type: goMuleRouterChannelType, Name: "suffixed model outside the route table", Key: "sk-9",
 			Models: "video@thinking:on", ModelMapping: &suffixMapping, OtherSettings: muleRouterSettings(zImageOnly),
 		},
 		{
-			Id: 10, Type: constant.ChannelTypeMuleRouter, Name: "mapping reaches nothing outside the route table", Key: "sk-10",
+			Id: 10, Type: goMuleRouterChannelType, Name: "mapping reaches nothing outside the route table", Key: "sk-10",
 			Models: "z-image,other,loop,spare", ModelMapping: &harmlessMapping, OtherSettings: muleRouterSettings(zImageOnly),
 		},
 	}
@@ -187,14 +187,14 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		2: {constant.ChannelTypeTaskPlugin, `{"task_plugin_key":"mulerouter"}`, `{}`, &defaultURL},
 		// Not a MuleRouter channel: its empty Base URL stays empty.
 		3: {constant.ChannelTypeTaskPlugin, soraSetting, `{}`, &empty},
-		// Channels that stay on the Go adaptor keep their empty Base URL.
-		4: {constant.ChannelTypeMuleRouter, "", muleRouterSettings(undeclared), &empty},
-		5: {constant.ChannelTypeMuleRouter, "", muleRouterSettings(repriced), &empty},
-		// The plugin cannot serve it, so it goes where the Go adaptor serves it.
-		6:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(repriced), &empty},
-		7:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(zImageOnly), &empty},
-		8:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(zImageOnly), &empty},
-		9:  {constant.ChannelTypeMuleRouter, "", muleRouterSettings(zImageOnly), &empty},
+		// Channels that stay on type 64 keep their empty Base URL.
+		4: {goMuleRouterChannelType, "", muleRouterSettings(undeclared), &empty},
+		5: {goMuleRouterChannelType, "", muleRouterSettings(repriced), &empty},
+		// The plugin cannot serve it, so it goes back to type 64, where the Go adaptor served it.
+		6:  {goMuleRouterChannelType, "", muleRouterSettings(repriced), &empty},
+		7:  {goMuleRouterChannelType, "", muleRouterSettings(zImageOnly), &empty},
+		8:  {goMuleRouterChannelType, "", muleRouterSettings(zImageOnly), &empty},
+		9:  {goMuleRouterChannelType, "", muleRouterSettings(zImageOnly), &empty},
 		10: {constant.ChannelTypeTaskPlugin, `{"task_plugin_key":"mulerouter"}`, movedSettings, &defaultURL},
 		11: {constant.ChannelTypeTaskPlugin, `{"task_plugin_key":"mulerouter"}`, movedSettings, &defaultURL},
 	}

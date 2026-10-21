@@ -210,6 +210,14 @@ func TestMulerouterPluginSubmissions(t *testing.T) {
 			ratios: map[string]float64{"prompt_extend": 1},
 		},
 		{
+			name:   "z-image top-level explicit zero seed and prompt_extend false reach upstream",
+			model:  "z-image-spicy",
+			body:   `{"model":"z-image-spicy","prompt":"a cat","seed":0,"prompt_extend":false}`,
+			url:    zImage,
+			upload: map[string]any{"prompt": "a cat", "seed": float64(0), "prompt_extend": false},
+			ratios: map[string]float64{"prompt_extend": 1},
+		},
+		{
 			name:   "z-image prompt_extend true",
 			model:  "z-image-spicy",
 			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"prompt_extend":true}}`,
@@ -454,6 +462,35 @@ func TestMulerouterPluginSubmissions(t *testing.T) {
 			model:  "wan2.2-i2v-spicy",
 			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":9}`,
 			reject: "invalid value 9 for duration, allowed: 5, 8",
+		},
+		{
+			// The host bounds every duration in the request before the plugin
+			// runs, so it refuses these instead of the endpoint. The Go adaptor
+			// refused them too, saying the seconds or the duration were out of
+			// range.
+			name:   "wan2.2 negative top-level duration",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":-5}`,
+			reject: "plugin usage value must be a finite non-negative number",
+		},
+		{
+			name:   "wan2.2 negative duration in metadata",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":{"duration":-5}}`,
+			reject: "plugin usage value must be a finite non-negative number",
+		},
+		{
+			name:   "wan2.2 duration far above its values",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":100000}`,
+			reject: "plugin usage value exceeds the host limit",
+		},
+		{
+			// A wrapped negative 64-bit integer.
+			name:   "wan2.2 huge duration in metadata",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":{"duration":18446744073686646784}}`,
+			reject: "plugin usage value exceeds the host limit",
 		},
 		{
 			name:   "wan2.2 unknown resolution",
