@@ -70,8 +70,8 @@ func muleRouterSettings(routes string) string {
 // Plugin channel (type 61, no route table), channels whose route tables the
 // plugin cannot serve at the same price, and tasks of each.
 //
-// A Go MuleRouter channel may leave its Base URL empty, because the Go adaptor
-// falls back to the channel type's default address. A plugin channel sends
+// A Go MuleRouter channel may have an empty Base URL, because the removed Go
+// adaptor fell back to the channel type's default address. A plugin channel sends
 // requests to the address on the channel, so a moved channel without one gets
 // that default, which is also the plugin's own default.
 func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
@@ -99,10 +99,10 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		{"name":"seconds","source":"duration","kind":"int","enum":[5,8],"default":"5","divisor":1},
 		{"name":"resolution","kind":"enum","values":{"480p":1,"720p":3},"default":"480p"}]}]}`
 	// The plugin serves every endpoint in its table on every channel, while the
-	// Go adaptor serves only the channel's own routes. A channel whose models
-	// reach, through model_mapping as the relay resolves it, an endpoint the
-	// plugin serves but its route table lacks would start serving (and
-	// charging for) that endpoint, so it stays on the Go adaptor.
+	// removed Go adaptor served only the channel's own routes. A channel whose
+	// models reach, through model_mapping as the relay resolves it, an endpoint
+	// the plugin serves but its route table lacks would start serving (and
+	// charging for) that endpoint, so it is parked on the retired type 64.
 	zImageOnly := `{"routes":[{"vendor":"carrothub","model":"z-image-spicy","billing_vars":[
 		{"name":"prompt_extend","kind":"enum","values":{"true":1.076923,"false":1},"default":"true"},
 		{"name":"width","kind":"int","min":256,"max":1536,"default":"1024"},
@@ -190,7 +190,7 @@ func TestMigrateMuleRouterChannelsToTaskPlugin(t *testing.T) {
 		// Channels that stay on type 64 keep their empty Base URL.
 		4: {goMuleRouterChannelType, "", muleRouterSettings(undeclared), &empty},
 		5: {goMuleRouterChannelType, "", muleRouterSettings(repriced), &empty},
-		// The plugin cannot serve it, so it goes back to type 64, where the Go adaptor served it.
+		// The plugin cannot serve it, so it is parked on the retired type 64, which nothing serves.
 		6:  {goMuleRouterChannelType, "", muleRouterSettings(repriced), &empty},
 		7:  {goMuleRouterChannelType, "", muleRouterSettings(zImageOnly), &empty},
 		8:  {goMuleRouterChannelType, "", muleRouterSettings(zImageOnly), &empty},

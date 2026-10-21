@@ -2,8 +2,9 @@
 // A channel model_mapping turns the public model name into one of these keys;
 // prices stay keyed by the public model name.
 //
-// Each endpoint lists its billing fields with the semantics of the Go channel's
-// billing_vars, so a request is charged exactly what the Go channel charges:
+// Each endpoint lists its billing fields with the semantics of the billing_vars
+// the removed Go channel stored, so a request is charged exactly what the Go
+// channel charged:
 // - int: an integer bounded by min/max or enum; the multiplier is value / divisor,
 //   and no divisor means the field is bounds-checked but not priced.
 // - enum: the stringified value looks up its multiplier in values.
@@ -26,9 +27,9 @@ const ENDPOINTS = {
   "carrothub/wan2.2-i2v-spicy/generation": {
     video: true,
     billing: [
-      // An omitted duration bills 5 seconds, as in the Go channel. On POST
-      // /v1/tasks/mulerouter a duration that is not 5 or 8 (5.5, "eight", 0)
-      // is refused before billing, as the Go channel refuses it. Only POST
+      // An omitted duration bills 5 seconds, as the Go channel billed it. On
+      // POST /v1/tasks/mulerouter a duration that is not 5 or 8 (5.5, "eight",
+      // 0) is refused before billing, as the Go channel refused it. Only POST
       // /v1/videos differs: taskDuration drops a top-level duration it cannot
       // read as a non-zero integer, so such a request bills 5 seconds and sends
       // no duration.
@@ -39,13 +40,13 @@ const ENDPOINTS = {
 };
 
 // The gateway's startup migration reads this table from the loaded plugin and
-// moves a Go MuleRouter channel onto the plugin only when every MuleRouter
-// endpoint the channel configures is declared here with the same billing
-// fields. No hook reads it. The export is a private contract with
+// moves a channel left from the removed Go adaptor onto the plugin only when
+// every MuleRouter endpoint the channel configures is declared here with the
+// same billing fields. No hook reads it. The export is a private contract with
 // loadMuleRouterPluginEndpoints in model/mulerouter_channel_migration.go, not
 // part of the plugin API: keep its name and its {<model name>: {billing}}
-// shape. A missing or renamed export keeps every channel on the Go adaptor
-// (fail closed).
+// shape. A missing or renamed export parks every such channel on the retired
+// type 64, which nothing serves (fail closed).
 export const muleRouterEndpoints = ENDPOINTS;
 
 // Request fields known to scale MuleRouter's cost. An endpoint that does not

@@ -154,7 +154,7 @@ func MigrateMuleRouterChannelsToTaskPlugin() error {
 		}
 		if len(problems) > 0 {
 			common.SysError(common.LogText("MuleRouter channel #%d stays on type 64, which nothing serves: %s", channel.Id, strings.Join(problems, "; ")))
-			if err := keepMuleRouterChannelOnGoAdaptor(channel); err != nil {
+			if err := parkMuleRouterChannelOnRetiredType(channel); err != nil {
 				return err
 			}
 			skipped = append(skipped, channel.Id)
@@ -179,8 +179,8 @@ func MigrateMuleRouterChannelsToTaskPlugin() error {
 // It reads the plugin's muleRouterEndpoints export, which is not part of the
 // plugin API: the name and shape ({<model name>: {billing: [billing_vars]}})
 // are a contract between this migration and plugins/tasks/mulerouter/plugin.js.
-// A missing or renamed export fails here and keeps every channel on the Go
-// adaptor (fail closed).
+// A missing or renamed export fails here and parks every channel on the
+// retired type 64, which nothing serves (fail closed).
 func loadMuleRouterPluginEndpoints() (map[string][]muleRouterBillingVar, error) {
 	plugin, ok := jsplugin.DefaultRegistry.Generation().Get(muleRouterPluginKey)
 	if !ok {
@@ -257,9 +257,9 @@ func muleRouterEndpointMismatch(route *muleRouterRoute, endpoints map[string][]m
 
 // muleRouterEndpointsOutsideRouteTable returns, sorted, the plugin endpoints a
 // request for one of the channel's models reaches through its model_mapping
-// although the channel's route table lacks them. The Go adaptor refuses such a
-// request, while the plugin serves every endpoint in its table, so moving the
-// channel would make it serve and charge for them.
+// although the channel's route table lacks them. The removed Go adaptor
+// refused such a request, while the plugin serves every endpoint in its
+// table, so moving the channel would make it serve and charge for them.
 //
 // The mapping is followed as the relay's ModelMappedHelper does, through
 // followChannelModelMapping with each hop's reasoning-suffix fallback filled
@@ -351,11 +351,12 @@ func moveMuleRouterChannelToTaskPlugin(channel *Channel) (int64, error) {
 	return movedTasks, err
 }
 
-// keepMuleRouterChannelOnGoAdaptor leaves a channel the plugin cannot serve
-// on type 64, the type of the removed Go adaptor, so it is never mistaken for
-// a Task Plugin channel. A type-64 channel is already there; a legacy type-61
+// parkMuleRouterChannelOnRetiredType parks a channel the plugin cannot serve
+// on type 64, the retired MuleRouter channel type that nothing serves, so it
+// is never mistaken for a Task Plugin channel and fails its requests until an
+// administrator fixes it. A type-64 channel is already there; a legacy type-61
 // channel moves to type 64 with its tasks.
-func keepMuleRouterChannelOnGoAdaptor(channel *Channel) error {
+func parkMuleRouterChannelOnRetiredType(channel *Channel) error {
 	if channel.Type != constant.ChannelTypeTaskPlugin {
 		return nil
 	}
