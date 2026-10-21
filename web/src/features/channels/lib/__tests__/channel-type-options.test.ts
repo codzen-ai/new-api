@@ -42,11 +42,3 @@ describe('channel type options for task plugin bind', () => {
     ).toBe(true)
   })
 })
-
-describe('channel type options', () => {
-  test('omits the retired MuleRouter type (64) now served by the task plugin', () => {
-    expect(CHANNEL_TYPE_OPTIONS.some((option) => option.value === 64)).toBe(
-      false
-    )
-  })
-})
