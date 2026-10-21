@@ -39,16 +39,6 @@ const ENDPOINTS = {
   },
 };
 
-// The gateway's startup migration reads this table from the loaded plugin and
-// moves a channel left from the removed Go adaptor onto the plugin only when
-// every MuleRouter endpoint the channel configures is declared here with the
-// same billing fields. No hook reads it. The export is a private contract with
-// loadMuleRouterPluginEndpoints in model/mulerouter_channel_migration.go, not
-// part of the plugin API: keep its name and its {<model name>: {billing}}
-// shape. A missing or renamed export parks every such channel on the retired
-// type 64, which nothing serves (fail closed).
-export const muleRouterEndpoints = ENDPOINTS;
-
 // Request fields known to scale MuleRouter's cost. An endpoint that does not
 // declare one of them refuses it, so an unpriced dimension never reaches the
 // vendor as an unbounded multiplier.
