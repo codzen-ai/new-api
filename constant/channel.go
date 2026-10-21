@@ -61,8 +61,9 @@ const (
 	ChannelTypeTaskPlugin     = 61
 	ChannelTypeVLLM           = 62
 	ChannelTypeSGLang         = 63
-	ChannelTypeMuleRouter     = 64
-	ChannelTypeDummy          // this one is only for count, do not add any channel after this
+	// 64 was ChannelTypeMuleRouter, removed with the MuleRouter Go adaptor
+	// (docs/adr/0001); the value stays reserved, do not reuse it.
+	ChannelTypeDummy // this one is only for count, do not add any channel after this
 
 )
 
@@ -133,7 +134,6 @@ var ChannelBaseURLs = []string{
 	"",                                          //61
 	"",                                          //62
 	"",                                          //63
-	"https://api.mulerouter.ai",                 //64
 }
 
 func GetChannelBaseURL(channelType int) string {
@@ -204,7 +204,6 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeTaskPlugin:     "Task Plugin",
 	ChannelTypeVLLM:           "vLLM",
 	ChannelTypeSGLang:         "SGLang",
-	ChannelTypeMuleRouter:     "MuleRouter",
 }
 
 func GetChannelTypeName(channelType int) string {

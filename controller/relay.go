@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +19,6 @@ import (
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
-	taskmulerouter "github.com/QuantumNous/new-api/relay/channel/task/mulerouter"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -751,12 +749,6 @@ func presentTaskSubmission(c *gin.Context, outcome *taskSubmissionOutcome) {
 			c.JSON(http.StatusOK, outcome.Task.ToOpenAIVideo())
 			return
 		}
-	}
-	if outcome.Task.Platform == constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeMuleRouter)) {
-		diagnostics.present(outcome.Task, "mulerouter")
-		status, body := taskmulerouter.SubmitResponse(c, outcome.Task)
-		c.JSON(status, body)
-		return
 	}
 	createdAt := outcome.Task.CreatedAt
 	if createdAt == 0 {

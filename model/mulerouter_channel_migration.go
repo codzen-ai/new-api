@@ -14,7 +14,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
-	"github.com/QuantumNous/new-api/relaykit/dto"
 	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
 	"gorm.io/gorm"
 )
@@ -22,6 +21,68 @@ import (
 // muleRouterPluginKey is the built-in task plugin that serves MuleRouter
 // endpoints on type-61 Task Plugin channels.
 const muleRouterPluginKey = "mulerouter"
+
+const (
+	// goMuleRouterChannelType is the channel type the removed MuleRouter Go
+	// adaptor served. constant/channel.go keeps the value reserved.
+	goMuleRouterChannelType = 64
+	// goMuleRouterBaseURL is the address the Go adaptor used for a channel
+	// without a Base URL; the mulerouter plugin declares it as its baseUrl.
+	goMuleRouterBaseURL = "https://api.mulerouter.ai"
+	// muleRouterDefaultAction is the action of a route that names none.
+	muleRouterDefaultAction = "generation"
+)
+
+// muleRouterConfig is the MuleRouter route table a Go adaptor channel stored
+// under "mulerouter" in its settings column.
+type muleRouterConfig struct {
+	Routes []muleRouterRoute `json:"routes,omitempty"`
+}
+
+// muleRouterRoute is one MuleRouter endpoint of a channel's route table.
+type muleRouterRoute struct {
+	Vendor      string                 `json:"vendor"`
+	Model       string                 `json:"model"`
+	Action      string                 `json:"action,omitempty"`
+	BillingVars []muleRouterBillingVar `json:"billing_vars,omitempty"`
+}
+
+// muleRouterBillingVar bounds one request field of an endpoint and prices it.
+// The channel's billing_vars and the plugin's muleRouterEndpoints export share
+// this shape, so the two are compared field by field.
+type muleRouterBillingVar struct {
+	Name    string             `json:"name"`
+	Source  string             `json:"source,omitempty"`
+	Kind    string             `json:"kind"`
+	Default string             `json:"default"`
+	Min     *float64           `json:"min,omitempty"`
+	Max     *float64           `json:"max,omitempty"`
+	Enum    []float64          `json:"enum,omitempty"`
+	Values  map[string]float64 `json:"values,omitempty"`
+	Divisor float64            `json:"divisor,omitempty"`
+}
+
+// modelName is the endpoint's MuleRouter model name,
+// "{vendor}/{model}/{action}".
+func (r *muleRouterRoute) modelName() string {
+	action := strings.TrimSpace(r.Action)
+	if action == "" {
+		action = muleRouterDefaultAction
+	}
+	return fmt.Sprintf("%s/%s/%s", strings.TrimSpace(r.Vendor), strings.TrimSpace(r.Model), action)
+}
+
+// channelMuleRouterConfig returns the MuleRouter route table stored on the
+// channel, or nil when it carries none or its settings cannot be read.
+func channelMuleRouterConfig(channel *Channel) *muleRouterConfig {
+	var settings struct {
+		MuleRouter *muleRouterConfig `json:"mulerouter"`
+	}
+	if channel.OtherSettings == "" || common.UnmarshalJsonStr(channel.OtherSettings, &settings) != nil {
+		return nil
+	}
+	return settings.MuleRouter
+}
 
 // MuleRouter channels had type 61 before upstream assigned it to the Task
 // Plugin channel (constant.ChannelTypeTaskPlugin). A type-61 channel is a
@@ -31,7 +92,7 @@ const muleRouterPluginKey = "mulerouter"
 // The Go adaptor's tasks carry its channel type as their platform, or the
 // legacy type 61 when they were submitted before the type moved.
 var (
-	goMuleRouterTaskPlatform     = constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeMuleRouter))
+	goMuleRouterTaskPlatform     = constant.TaskPlatform(strconv.Itoa(goMuleRouterChannelType))
 	legacyMuleRouterTaskPlatform = constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeTaskPlugin))
 )
 
@@ -46,8 +107,10 @@ var (
 //
 // A channel moves only when every MuleRouter endpoint in its route table is
 // declared by the plugin with exactly the same billing fields, judged against
-// the table the loaded plugin exports. Any other channel is left to the Go
-// adaptor on type 64 and logged with the endpoints that do not conform.
+// the table the loaded plugin exports. Any other channel is left on type 64,
+// where the removed Go adaptor served it, and logged with the endpoints that do
+// not conform; nothing serves type 64 any more, so such a channel fails its
+// requests until an administrator fixes it.
 //
 // A moved channel no longer carries a route table, so it is never selected
 // again and running this on every start is safe. It must run on the master
@@ -55,12 +118,12 @@ var (
 func MigrateMuleRouterChannelsToTaskPlugin() error {
 	var channels []Channel
 	if err := DB.Select("id", "type", "base_url", "models", "model_mapping", "setting", "settings").
-		Where("type IN ?", []int{constant.ChannelTypeMuleRouter, constant.ChannelTypeTaskPlugin}).
+		Where("type IN ?", []int{goMuleRouterChannelType, constant.ChannelTypeTaskPlugin}).
 		Order("id").Find(&channels).Error; err != nil {
 		return err
 	}
 	channels = slices.DeleteFunc(channels, func(channel Channel) bool {
-		return channel.Type == constant.ChannelTypeTaskPlugin && channel.GetOtherSettings().MuleRouter == nil
+		return channel.Type == constant.ChannelTypeTaskPlugin && channelMuleRouterConfig(&channel) == nil
 	})
 	if len(channels) == 0 {
 		return nil
@@ -71,7 +134,7 @@ func MigrateMuleRouterChannelsToTaskPlugin() error {
 	var migratedTasks int64
 	for i := range channels {
 		channel := &channels[i]
-		config := channel.GetOtherSettings().MuleRouter
+		config := channelMuleRouterConfig(channel)
 		var problems []string
 		switch {
 		case loadErr != nil:
@@ -90,7 +153,7 @@ func MigrateMuleRouterChannelsToTaskPlugin() error {
 			}
 		}
 		if len(problems) > 0 {
-			common.SysError(common.LogText("MuleRouter channel #%d stays on the Go adaptor: %s", channel.Id, strings.Join(problems, "; ")))
+			common.SysError(common.LogText("MuleRouter channel #%d stays on type 64, which nothing serves: %s", channel.Id, strings.Join(problems, "; ")))
 			if err := keepMuleRouterChannelOnGoAdaptor(channel); err != nil {
 				return err
 			}
@@ -104,7 +167,7 @@ func MigrateMuleRouterChannelsToTaskPlugin() error {
 		migrated = append(migrated, channel.Id)
 		migratedTasks += tasks
 	}
-	common.SysLog(common.LogText("moved %d MuleRouter channel(s) %v and %d task(s) onto the %s task plugin; %d channel(s) %v stay on the Go adaptor",
+	common.SysLog(common.LogText("moved %d MuleRouter channel(s) %v and %d task(s) onto the %s task plugin; %d channel(s) %v stay on type 64, which nothing serves",
 		len(migrated), migrated, migratedTasks, muleRouterPluginKey, len(skipped), skipped))
 	return nil
 }
@@ -118,7 +181,7 @@ func MigrateMuleRouterChannelsToTaskPlugin() error {
 // are a contract between this migration and plugins/tasks/mulerouter/plugin.js.
 // A missing or renamed export fails here and keeps every channel on the Go
 // adaptor (fail closed).
-func loadMuleRouterPluginEndpoints() (map[string][]dto.MuleRouterBillingVar, error) {
+func loadMuleRouterPluginEndpoints() (map[string][]muleRouterBillingVar, error) {
 	plugin, ok := jsplugin.DefaultRegistry.Generation().Get(muleRouterPluginKey)
 	if !ok {
 		return nil, errors.New("the mulerouter task plugin is not loaded")
@@ -132,12 +195,12 @@ func loadMuleRouterPluginEndpoints() (map[string][]dto.MuleRouterBillingVar, err
 		return nil, fmt.Errorf("read the mulerouter plugin endpoint table: %w", err)
 	}
 	var table map[string]struct {
-		Billing []dto.MuleRouterBillingVar `json:"billing"`
+		Billing []muleRouterBillingVar `json:"billing"`
 	}
 	if err := common.Unmarshal(encoded, &table); err != nil {
 		return nil, fmt.Errorf("read the mulerouter plugin endpoint table: %w", err)
 	}
-	endpoints := make(map[string][]dto.MuleRouterBillingVar, len(table))
+	endpoints := make(map[string][]muleRouterBillingVar, len(table))
 	for name, endpoint := range table {
 		endpoints[name] = endpoint.Billing
 	}
@@ -148,17 +211,20 @@ func loadMuleRouterPluginEndpoints() (map[string][]dto.MuleRouterBillingVar, err
 // MuleRouter endpoint at the same price, or returns "" when it can: the plugin
 // must declare the endpoint, and its billing fields must bound and price every
 // request field exactly as the channel's billing_vars do.
-func muleRouterEndpointMismatch(route *dto.MuleRouterRoute, endpoints map[string][]dto.MuleRouterBillingVar) string {
-	name := route.ModelName()
+func muleRouterEndpointMismatch(route *muleRouterRoute, endpoints map[string][]muleRouterBillingVar) string {
+	name := route.modelName()
 	billing, declared := endpoints[name]
 	if !declared {
 		return name + " is not declared by the plugin"
 	}
-	normalize := func(vars []dto.MuleRouterBillingVar) map[string]dto.MuleRouterBillingVar {
-		normalized := make(map[string]dto.MuleRouterBillingVar, len(vars))
+	normalize := func(vars []muleRouterBillingVar) map[string]muleRouterBillingVar {
+		normalized := make(map[string]muleRouterBillingVar, len(vars))
 		for _, v := range vars {
 			v.Name = strings.TrimSpace(v.Name)
-			v.Source = v.SourceKey()
+			v.Source = strings.TrimSpace(v.Source)
+			if v.Source == "" {
+				v.Source = v.Name
+			}
 			if len(v.Enum) == 0 {
 				v.Enum = nil
 			}
@@ -200,7 +266,7 @@ func muleRouterEndpointMismatch(route *dto.MuleRouterRoute, endpoints map[string
 // in first. A mapping the relay cannot read or that cycles fails every request
 // on both implementations, so it reaches nothing. Names neither in the route
 // table nor in the plugin table are refused by both and are not reported.
-func muleRouterEndpointsOutsideRouteTable(channel *Channel, config *dto.MuleRouterConfig, endpoints map[string][]dto.MuleRouterBillingVar) []string {
+func muleRouterEndpointsOutsideRouteTable(channel *Channel, config *muleRouterConfig, endpoints map[string][]muleRouterBillingVar) []string {
 	modelMap := map[string]string{}
 	if mapping := channel.GetModelMapping(); mapping != "" && mapping != "{}" {
 		if err := common.UnmarshalJsonStr(mapping, &modelMap); err != nil {
@@ -223,7 +289,8 @@ func muleRouterEndpointsOutsideRouteTable(channel *Channel, config *dto.MuleRout
 		if _, served := endpoints[upstream]; !served {
 			continue
 		}
-		if _, routed := config.FindRouteByModelName(upstream); !routed && !slices.Contains(outside, upstream) {
+		routed := slices.ContainsFunc(config.Routes, func(route muleRouterRoute) bool { return route.modelName() == strings.TrimSpace(upstream) })
+		if !routed && !slices.Contains(outside, upstream) {
 			outside = append(outside, upstream)
 		}
 	}
@@ -263,7 +330,7 @@ func moveMuleRouterChannelToTaskPlugin(channel *Channel) (int64, error) {
 	}
 	// The mulerouter plugin declares the same address as its baseUrl.
 	if channel.BaseURL == nil || strings.TrimSpace(*channel.BaseURL) == "" {
-		updates["base_url"] = constant.GetChannelBaseURL(constant.ChannelTypeMuleRouter)
+		updates["base_url"] = goMuleRouterBaseURL
 	}
 
 	var movedTasks int64
@@ -285,15 +352,16 @@ func moveMuleRouterChannelToTaskPlugin(channel *Channel) (int64, error) {
 }
 
 // keepMuleRouterChannelOnGoAdaptor leaves a channel the plugin cannot serve
-// with the Go adaptor. A type-64 channel is already there; a legacy type-61
-// channel moves to type 64 with its tasks, or nothing would serve it.
+// on type 64, the type of the removed Go adaptor, so it is never mistaken for
+// a Task Plugin channel. A type-64 channel is already there; a legacy type-61
+// channel moves to type 64 with its tasks.
 func keepMuleRouterChannelOnGoAdaptor(channel *Channel) error {
 	if channel.Type != constant.ChannelTypeTaskPlugin {
 		return nil
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&Channel{}).Where("id = ? AND type = ?", channel.Id, constant.ChannelTypeTaskPlugin).
-			Update("type", constant.ChannelTypeMuleRouter).Error; err != nil {
+			Update("type", goMuleRouterChannelType).Error; err != nil {
 			return err
 		}
 		return tx.Model(&Task{}).
