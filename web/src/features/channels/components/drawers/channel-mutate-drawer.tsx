@@ -141,7 +141,6 @@ import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_STATUS_LABELS,
   CHANNEL_TYPE_NEW_API,
-  CHANNEL_TYPE_MULEROUTER,
   CHANNEL_TYPE_OLLAMA,
   CHANNEL_TYPE_OPTIONS,
   CHANNEL_TYPE_TASK_PLUGIN,
@@ -171,7 +170,6 @@ import {
   channelFormSchema,
   channelsQueryKeys,
   getAdvancedCustomStats,
-  MULEROUTER_ROUTES_PLACEHOLDER,
   transformChannelToFormDefaults,
   type ChannelFormValues,
   deduplicateKeys,
@@ -292,7 +290,6 @@ const SENSITIVE_FORM_FIELDS = [
   'settings',
   'setting',
   'advanced_custom',
-  'mulerouter',
   'is_enterprise_account',
   'vertex_key_type',
   'aws_key_type',
@@ -4255,32 +4252,6 @@ export function ChannelMutateDrawer({
                     <FormControl>
                       <input type='hidden' {...field} />
                     </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            )}
-
-            {currentType === CHANNEL_TYPE_MULEROUTER && (
-              <FormField
-                control={form.control}
-                name='mulerouter'
-                render={({ field }) => (
-                  <FormItem className='space-y-3 border-y py-4'>
-                    <FormLabel>{t('MuleRouter Routes')}</FormLabel>
-                    <FormControl>
-                      <Textarea
-                        placeholder={MULEROUTER_ROUTES_PLACEHOLDER}
-                        rows={12}
-                        className='font-mono text-xs'
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      {t(
-                        'Route table in JSON. Each route maps /vendors/{vendor}/v1/{model}/{action} to the model name "{vendor}/{model}/{action}". Every request field that scales cost must be declared in billing_vars with bounds; undeclared cost fields are rejected at request time.'
-                      )}
-                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
