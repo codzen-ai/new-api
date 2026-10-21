@@ -27,8 +27,8 @@ TASK_ID_PREFIX = "task_"
 SUBMIT_PATH = "/v1/tasks/mulerouter"
 TASK_PATH = "/v1/tasks"
 
-# 上游基准单位价（美元），来自各端点文档页：图片按张，视频按秒 —— 与 billing_vars 的
-# 倍率基准一致（seconds 倍率取实际秒数，和 ali/gemini/sora/vertex 的约定相同）。
+# 上游基准单位价（美元），来自各端点文档页：图片按张，视频按秒 —— 与插件 ENDPOINTS 表
+# 计费字段的倍率基准一致（seconds 倍率取实际秒数，和 ali/gemini/sora/vertex 的约定相同）。
 # 实例配的 model_price 可以更高（加价是运营决策），preflight 只在低于成本价时警告。
 UPSTREAM_BASE_PRICE = {
     "qwen-image-edit-spicy": 0.04,
@@ -269,7 +269,7 @@ def guard_checks(client):
     guards = [
         {
             "name": "undeclared_cost_param",
-            "why": "计费声明（插件渠道 plugin.js 的 ENDPOINTS 表，Go 渠道的 billing_vars）没有的成本字段（n）藏在 metadata 里也必须被拒，否则就是一个无界乘数入口",
+            "why": "计费声明（plugin.js 的 ENDPOINTS 表）没有的成本字段（n）藏在 metadata 里也必须被拒，否则就是一个无界乘数入口",
             "body": {"model": "z-image-spicy", "prompt": "guard check", "metadata": {"n": 4}},
             "expect": (400,),
             "must_contain": ["affect the price"],
@@ -300,20 +300,14 @@ def guard_checks(client):
         },
         {
             "name": "unlisted_model",
-            "why": "端点表（插件渠道 plugin.js 的 ENDPOINTS 表，Go 渠道的 settings.mulerouter 路由）里没有的模型既没有价格也没有乘数约束，必须拒绝",
+            "why": "端点表（plugin.js 的 ENDPOINTS 表）里没有的模型既没有价格也没有乘数约束，必须拒绝",
             # 未登记的模型通常先死在渠道选择上（503「无可用渠道」，平台既有约定），
-            # 只有当渠道的 models 列了这个名字、路由表却没有时，才会走到适配器的 404。
+            # 只有当渠道的 models 列了这个名字、ENDPOINTS 表却没有时，才会走到插件的
+            # 「this model is not available on this channel」。
             "body": {"model": "not-a-real-model", "prompt": "guard check"},
             "expect": (400, 404, 503),
-            "must_contain": ["not-a-real-model", "无可用渠道", "not configured", "no available channel"],
-        },
-        {
-            "name": "vendor_path_hidden",
-            "why": "厂商原生路径不应对客户端开放 —— 渠道模型列表里只有短名时它必然无渠道可选",
-            "path": "/vendors/carrothub/v1/z-image-spicy/generation",
-            "body": {"prompt": "guard check"},
-            "expect": (404, 503),
-            "must_contain": ["无可用渠道", "no available channel", "not configured"],
+            "must_contain": ["not-a-real-model", "无可用渠道", "not configured", "no available channel",
+                             "not available on this channel"],
         },
         {
             "name": "missing_token",
@@ -328,7 +322,7 @@ def guard_checks(client):
     results = []
     for guard in guards:
         token = guard.get("token", ...)
-        status, _, payload = client.relay("POST", guard.get("path", SUBMIT_PATH), guard["body"], token=token)
+        status, _, payload = client.relay("POST", SUBMIT_PATH, guard["body"], token=token)
         message = extract_message(payload)
         lowered = message.lower()
         matched = next((needle for needle in guard["must_contain"] if needle.lower() in lowered), None)
