@@ -25,7 +25,6 @@ import {
   CHANNEL_TYPE_TASK_PLUGIN,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
-  CHANNEL_TYPE_MULEROUTER,
   CHANNEL_STATUS,
   ERROR_MESSAGES,
   FIELD_PASSTHROUGH_TYPES,
@@ -41,11 +40,6 @@ import {
   stringifyAdvancedCustomConfig,
   validateAdvancedCustomConfig,
 } from './advanced-custom'
-import {
-  parseMuleRouterConfig,
-  stringifyMuleRouterConfig,
-  validateMuleRouterConfig,
-} from './mulerouter'
 import { readTaskExtendPluginKeys } from './channel-plugin-extensions'
 import { supportsResponsesWebSocket } from './responses-websocket'
 
@@ -260,7 +254,6 @@ export const channelFormSchema = z
       .optional()
       .refine(isOptionalJsonObject, ERROR_MESSAGES.INVALID_JSON),
     advanced_custom: z.string().optional(),
-    mulerouter: z.string().optional(),
     other: z.string().optional(),
     // Multi-key options (not sent to backend directly)
     multi_key_mode: z.enum(['single', 'batch', 'multi_to_single']).optional(),
@@ -328,13 +321,6 @@ export const channelFormSchema = z
       !data.task_plugin_key?.trim()
     ) {
       addRequiredIssue(ctx, 'task_plugin_key', 'Task plugin is required')
-    }
-
-    if (data.type === CHANNEL_TYPE_MULEROUTER) {
-      const muleRouterError = validateMuleRouterConfig(data.mulerouter)
-      if (muleRouterError) {
-        addRequiredIssue(ctx, 'mulerouter', muleRouterError)
-      }
     }
 
     if (data.type === CHANNEL_TYPE_ADVANCED_CUSTOM) {
@@ -503,7 +489,6 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   upstream_model_update_auto_sync_enabled: false,
   upstream_model_update_ignored_models: '',
   advanced_custom: '',
-  mulerouter: '',
 }
 
 // ============================================================================
@@ -580,7 +565,6 @@ export function transformChannelToFormDefaults(
   let upstreamModelUpdateAutoSyncEnabled = false
   let upstreamModelUpdateIgnoredModels = ''
   let advancedCustom = ''
-  let muleRouter = ''
 
   if (channel.settings) {
     try {
@@ -611,9 +595,6 @@ export function transformChannelToFormDefaults(
         : ''
       if (parsed.advanced_custom) {
         advancedCustom = stringifyAdvancedCustomConfig(parsed.advanced_custom)
-      }
-      if (parsed.mulerouter) {
-        muleRouter = stringifyMuleRouterConfig(parsed.mulerouter)
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -669,7 +650,6 @@ export function transformChannelToFormDefaults(
     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
     advanced_custom: advancedCustom,
-    mulerouter: muleRouter,
   }
 }
 
@@ -867,15 +847,6 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     }
   } else if ('advanced_custom' in settingsObj) {
     delete settingsObj.advanced_custom
-  }
-
-  if (formData.type === CHANNEL_TYPE_MULEROUTER) {
-    const muleRouterConfig = parseMuleRouterConfig(formData.mulerouter)
-    if (muleRouterConfig) {
-      settingsObj.mulerouter = muleRouterConfig
-    }
-  } else if ('mulerouter' in settingsObj) {
-    delete settingsObj.mulerouter
   }
 
   return JSON.stringify(settingsObj)
