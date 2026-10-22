@@ -105,7 +105,7 @@ GLOSSARY 规定调用方只见 Public model name，见不到 MuleRouter model na
 | 控制台任务列表 `GET /api/task/self?task_id=` | 访问令牌 |
 | 使用日志 `GET /api/log/self` | 沿用 `quota_charged` 找到的那条消费日志 |
 
-`GET /v1/video/generations/{id}`、`platform: "mulerouter"` 和提交地址里的插件 key 不在范围内，见 #40。插件 key 是 `mulerouter`，不含这两个词，所以 `platform` 字段不会触发失败。
+`GET /v1/video/generations/{id}`、`platform: "mulerouter"` 和提交地址里的插件 key 不在范围内，见 codzen-ai/new-api#40。插件 key 是 `mulerouter`，不含这两个词，所以 `platform` 字段不会触发失败。
 
 **判定**：任何字段的字符串值里出现两个词之一（不分大小写）就失败。值本身是 JSON 字符串的（使用日志的 `other`）先拆开再查。
 

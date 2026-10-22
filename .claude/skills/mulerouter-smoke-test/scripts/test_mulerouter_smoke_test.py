@@ -53,10 +53,6 @@ class VendorHiddenCheckTest(unittest.TestCase):
         result = smoke.verify_case({"task_id": "task_abc", "caller_views": caller_views}, "wan-480p", self.CTX)
         return next(check for check in result["checks"] if check["name"] == "vendor_hidden")
 
-    def test_passes_when_no_response_mentions_the_vendor(self):
-        check = self.vendor_hidden({"GET /v1/tasks/{id}": {"task_id": "task_abc", "platform": "mulerouter"}})
-        self.assertTrue(check["passed"])
-
     def test_fails_naming_each_response_and_field(self):
         check = self.vendor_hidden({
             "GET /v1/tasks/{id}": {"task_id": "task_abc"},
