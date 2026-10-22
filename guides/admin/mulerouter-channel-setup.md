@@ -183,7 +183,7 @@ MuleRouter endpoint 写在插件代码里，新增要改代码、发版：
 插件认 MuleRouter 文档里的两套状态词：`pending`/`queued`（排队中）、`processing`/`running`/`retrying`（进行中）、`completed`/`succeeded`（成功）、`failed`（失败）。上游返回别的值时，这次轮询记为失败，后端日志有一条带 `unknown task status` 和原始响应的 WARN；连续失败达到 `TASK_POLL_MAX_FAILURES` 次（默认 20 次，约 5 分钟）后，网关把任务判失败并退款。看到这条日志就把原始响应交给开发，在 `plugin.js` 的 `TASK_STATUSES` 里补映射。没有这条日志就是上游在排队。任务超过 24 小时会自动判失败并退款。
 
 **任务失败，`fail_reason` 是什么意思**
-插件依次读上游响应里 `task_info.error` 和顶层的 `error`，把标题、详情和错误码拼成失败原因，形如 `External service execution failed: Kling task failed: video generation failed due to prompt violation (error code 3005)`。两处都没有错误对象时才是通用的 `task failed`。提交时上游就同步返回失败的，按同样规则给出原因。
+插件依次读上游响应里 `task_info.error` 和顶层的 `error`，取第一处有标题、详情或错误码的，拼成失败原因，形如 `External service execution failed: Kling task failed: video generation failed due to prompt violation (error code 3005)`。`task_info.error` 是空对象或不是对象时，读顶层的 `error`。两处都没有时才是通用的 `task failed`。提交时上游就同步返回失败（`task_info.status` 为 `failed`，或没有返回任务、只返回了错误）的，按同样规则给出原因。
 
 **任务失败，原因是「the task completed without producing any image, video or audio」**
 上游报告完成，却没有返回任何产物。插件把这种任务判为失败，网关自动退款给用户。偶发的话是上游问题；频繁出现就去 MuleRouter 后台查对应任务。

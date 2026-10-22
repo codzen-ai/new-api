@@ -346,8 +346,8 @@ curl -X POST "$BASE_URL/v1/videos" \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{
     "model": "wan2.2-i2v-spicy",
-    "prompt": "orbit",
-    "image": "https://cdn/in.png",
+    "prompt": "镜头缓缓推进，人物微笑",
+    "image": "https://example.com/first-frame.png",
     "seconds": "8",
     "size": "480x832"
   }'
@@ -360,12 +360,12 @@ curl -X POST "$BASE_URL/v1/videos" \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{
     "model": "wan2.2-i2v-spicy",
-    "prompt": "orbit",
-    "image": "https://cdn/in.png",
+    "prompt": "镜头缓缓推进，人物微笑",
+    "image": "https://example.com/first-frame.png",
     "resolution": "720p",
     "seed": 7,
     "prompt_extend": false,
-    "last_image": "https://cdn/last.png"
+    "last_image": "https://example.com/last-frame.png"
   }'
 ```
 
