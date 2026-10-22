@@ -15,7 +15,7 @@ description: Smoke-test a new-api instance's MuleRouter channel (a Task Plugin c
 
 ## 为什么要真跑
 
-MuleRouter 渠道的正确性有一半不在 new-api 里：上游响应体的字段名、失败态 `error` 对象的形状、产物数组的键名，都是文档里读来的假设。假设错了的表现很隐蔽 —— 提交会成功，然后任务卡在未知状态，每轮轮询报错，直到 24 小时超时才被判失败并退款。单测抓不到这个，只有真发一次请求才知道。
+MuleRouter 渠道的正确性有一半不在 new-api 里：上游响应体的字段名、失败态 `error` 对象的形状、产物数组的键名，都是文档里读来的假设。假设错了的表现很隐蔽 —— 提交会成功，然后任务卡在未知状态，每轮轮询报错，连续失败到 `TASK_POLL_MAX_FAILURES` 次（默认 20 次，约 5 分钟）后被判失败并退款，而上游可能照样生成、照样收我们的钱。单测抓不到这个，只有真发一次请求才知道。
 
 代价很低：默认三个用例合计约 $0.15（z-image $0.013、qwen-edit $0.04、wan-480p $0.10）。
 
@@ -68,11 +68,21 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 --cases z-image,qwen-edit,wan-480p,wan-720p-8s   # 加上最贵档，$0.47
 ```
 
-用例按用户指南推荐的写法发：Vendor parameter（`width`、`height`、`prompt_extend`、`resolution`）放在 `metadata` 下，`prompt`、`image`、`duration` 留在顶层。`/v1/tasks/mulerouter` 两种写法都认，但 `/v1/videos` 只认 `metadata` 里的 Vendor parameter。新加用例照这个写。
+用例照用户指南示例的写法发：Vendor parameter（`width`、`height`、`prompt_extend`、`resolution`）放在 `metadata` 下，`prompt`、`image`、`duration` 留在顶层。两个入口都认顶层和 `metadata` 两种写法，新加用例照示例写。
 
 需要输入图的用例（`qwen-edit`、`wan-*`）会自动排到后面，用前面 z-image 产物的 `content_url` 当输入。这个地址在本站上，生成服务必须访问得到：测 localhost 这类外网到不了的实例时，传 `--image-url` 给一张公网图。
 
 单个用例的链路是：提交 → 断言 200 和本站任务 ID → 轮询到终态 → 取产物并 HEAD 一次 `content_url` → 读消费日志 → 复算扣费。视频用例慢，`--poll-timeout` 默认 600 秒。
+
+**`POST /v1/videos` 脚本不覆盖**，验证 OpenAI 视频入口时手工发一次标准写法，输入图用 z-image 用例的产物：
+
+```bash
+curl -sS -D - -X POST "$NEW_API_BASE_URL/v1/videos" -H "Authorization: Bearer $NEW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"wan2.2-i2v-spicy","prompt":"镜头缓缓推进，人物微笑","input_reference":"<图片 URL>","seconds":"5","size":"1280x720"}'
+```
+
+期望：200，响应头 `X-New-Api-Other-Ratios: {"resolution":2,"seconds":5}`（`size` 按短边映射成 `720p`）；`GET /v1/videos/{id}` 轮询到 `completed`；`GET /v1/videos/{id}/content` 返回 `video/mp4`；消费日志扣 `固定价 × 5 × 2`，action 为 `image_to_video`。约 $0.20。同一请求里 `seconds` 和 `duration` 取值不同、或带 `mode` 这类上游不认的字段，会在扣费前返回 400 —— 这两个请求免费，适合用来确认实例跑的是哪个版本的插件。
 
 ### 第 3 步：读结果
 
@@ -112,10 +122,11 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 | 概念 | 位置 |
 |---|---|
-| 端点表 | `ENDPOINTS` 表（键即 MuleRouter model name `{vendor}/{model}/{action}`） |
-| 计费声明 | 同一张 `ENDPOINTS` 表里每个端点的 `billing` |
+| 端点表 | `ENDPOINTS` 能力表（键即 MuleRouter model name `{vendor}/{model}/{action}`；每个端点有 `produces`、`action`） |
+| 计费声明 | 同一张表里每个端点的 `fields`：`values` 是取值到倍率的映射，`ratio` 是宿主收到的倍率名，`default` 是缺省时的计费值 |
 | 成本字段黑名单 | `COST_FIELDS` |
-| 响应解析 | `parseSubmitResponse` / `parseTaskResult` / `TASK_STATUSES` |
+| `/v1/videos` 解码 | `OPENAI_VIDEO_FIELDS`（`seconds`/`size`/`input_reference` 的映射），视频端点的 `params`（允许透传的字段） |
+| 响应解析 | `parseSubmitResponse` / `parseTaskResult` / `TASK_STATUSES` / `failureReason` |
 | 产物 | `listArtifacts` / `buildContentRequest` |
 
 这些是代码，改完要重新部署（见 [ADR-0001](../../../docs/adr/0001-mulerouter-endpoints-live-in-a-task-plugin.md)）。渠道上能改的只有模型列表、「模型重定向」、Base URL 和密钥；价格在模型固定价格里。
@@ -128,13 +139,19 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 **提交报 `this model is not available on this channel`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在端点表里。检查两者是否对齐。
 
-**提交 400 且报某个字段"影响成本但未声明"** —— 请求里（顶层或 `metadata` 里）带了成本字段黑名单里的键（`n`/`duration`/`resolution`/`size`/`width`/`height` 等）而该 endpoint 没声明它。这是设计行为不是 bug：在计费声明里给它加一条带上界的声明，或者别传这个字段。
+**提交 400 且报某个字段"影响成本但未声明"** —— 请求里（顶层或 `metadata` 里）带了成本字段黑名单里的键（`n`/`duration`/`resolution`/`size`/`width`/`height` 等）而该 endpoint 没声明它。这是设计行为不是 bug：在该端点的 `fields` 里给它加一条带取值范围的声明，或者别传这个字段。
 
-**提交成功但轮询一直 `pending`** —— 先看后端日志有没有 `unknown task status`。有的话说明上游状态值超出了 `pending/processing/completed/failed` 四种，需要在 `plugin.js` 的 `TASK_STATUSES` 里补映射。没有的话就是上游确实在排队。
+**`/v1/videos` 提交 400「not supported by this model」或「give different values」** —— 前者是请求带了端点 `fields` 和 `params` 之外的字段（如 `mode`），后者是同一参数两种写法取值不同（`seconds` 和 `duration`、`size` 和 `resolution`、顶层和 `metadata`）。都是设计行为。
+
+**提交成功但轮询一直不结束** —— 先看后端日志有没有 `unknown task status`。有的话说明上游状态值超出了插件认的两套状态词（见管理员指南 `guides/admin/mulerouter-channel-setup.md` 的排障），需要在 `TASK_STATUSES` 里补映射；连续失败到 `TASK_POLL_MAX_FAILURES` 次后任务会被判失败并退款。没有这条日志就是上游确实在排队。
+
+**`task_completed` 失败，原因是 `the task completed without producing any image, video or audio`** —— 上游报告完成但没有给产物，插件按设计判失败、宿主退款。把轮询的原始响应贴出来：多半是产物数组的键名和文档不符，对着改 `resultURL` / `resultImageURLs`。
+
+**`task_completed` 失败，原因只有 `task failed`** —— 上游失败响应里 `task_info.error` 和顶层 `error` 都没有可读的错误对象。把原始响应贴出来，对着改 `failureReason`。
 
 **提交返回 `invalid_upstream_response`（没有 task id）** —— 上游 202 响应体的形状和文档不符。把原始响应贴出来，对着改 `plugin.js` 的 `parseSubmitResponse`。
 
-**`billing_ratios` 拿到空表** —— 该用例期望的倍率本来就是空（`qwen-edit` 没有计费变量），这是正常的；如果 z-image 或 wan 拿到空表，说明计费声明里没有这个端点的计费字段。
+**`billing_ratios` 拿到空表** —— 该用例期望的倍率本来就是空（`qwen-edit` 没有计费变量），这是正常的；如果 z-image 或 wan 拿到空表，说明这个端点的 `fields` 里没有带 `ratio` 的字段。
 
 **额度对不上但每个用例都 PASS** —— 测试期间有其他请求在消费同一个账号。换一个专用账号重跑。
 
