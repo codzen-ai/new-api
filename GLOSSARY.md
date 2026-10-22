@@ -17,7 +17,7 @@ One upstream MuleRouter operation, addressed by vendor, model and action, togeth
 _Avoid_: Route, route row, MuleRouter route
 
 **MuleRouter model name**:
-The upstream identity of a MuleRouter endpoint, spelled `{vendor}/{model}/{action}`. Clients never send it; they reach it through a public model name.
+The upstream identity of a MuleRouter endpoint, spelled `{vendor}/{model}/{action}`. Clients never send or see it; they reach it through a public model name.
 _Avoid_: Internal model name, full model name
 
 **Public model name**:
