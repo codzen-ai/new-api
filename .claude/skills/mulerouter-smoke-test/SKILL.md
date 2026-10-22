@@ -183,7 +183,7 @@ GLOSSARY 规定调用方只见 Public model name，见不到 MuleRouter model na
 **`vendor_hidden` 失败** —— 按 detail 里的字段找来源：
 - `GET /v1/videos/{id}` 的 `metadata.*`：插件 `openai_video.render` 又带出了结果 URL。
 - `properties.upstream_model_name`（任务列表）或 `other.upstream_model_name`（使用日志）含 `carrothub`：渠道配了到 MuleRouter model name 的 `model_mapping`。删掉它，原因见 [ADR-0002](../../../docs/adr/0002-mulerouter-plugin-declares-public-model-names.md)。
-- 控制台任务列表的 `data.*`：这是宿主存下的上游原始响应，由宿主原样返回（`relay.TaskModel2Dto` 的 `Data`），插件管不到，要改宿主；把证据交给用户决定怎么处理。
+- 控制台任务列表的 `data.*`：任务的 `data` 是宿主存下的上游原始响应。控制台列表查询时不读这一列（`model/task.go` 里 `TaskGetAllUserTask` 的 `Omit("data")`），正常应为 `null`；出现了说明宿主改了这条查询，插件管不到，把证据交给用户决定怎么处理。`GET /v1/video/generations/{id}` 会返回完整的 `data`，它不在本检查范围内，见 codzen-ai/new-api#40。
 
 ## 上游价目
 
