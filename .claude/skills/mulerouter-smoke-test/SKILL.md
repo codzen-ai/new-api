@@ -1,6 +1,6 @@
 ---
 name: mulerouter-smoke-test
-description: Smoke-test a new-api instance's MuleRouter channel (a Task Plugin channel bound to the `mulerouter` plugin) end to end — submit, poll, verify the response shape, the artifacts, the billing multipliers and the charged quota for the spicy image and video models (z-image-spicy, qwen-image-edit-spicy, wan2.2-i2v-spicy). Use this whenever the user wants to test, verify, validate or debug a MuleRouter / carrothub / spicy channel on a running instance — including phrasings like "测一下 MuleRouter 渠道", "验证 carrothub 配置对不对", "跑一下冒烟测试", "调用本地接口测试刚创建的模型", "check the image/video generation models work", or when they have just created a MuleRouter channel and want to confirm it relays correctly. Also use it when a MuleRouter request fails, returns an unexpected status, or charges an amount that looks wrong, and you need evidence from a live run.
+description: Smoke-test a new-api instance's MuleRouter channel (a Task Plugin channel bound to the `mulerouter` plugin) end to end — submit, poll, verify the response shape, the artifacts, the billing multipliers, the charged quota, and that callers never see MuleRouter for the spicy image and video models (z-image-spicy, qwen-image-edit-spicy, wan2.2-i2v-spicy). Use this whenever the user wants to test, verify, validate or debug a MuleRouter / carrothub / spicy channel on a running instance — including phrasings like "测一下 MuleRouter 渠道", "验证 carrothub 配置对不对", "跑一下冒烟测试", "调用本地接口测试刚创建的模型", "check the image/video generation models work", or when they have just created a MuleRouter channel and want to confirm it relays correctly. Also use it when a MuleRouter request fails, returns an unexpected status, or charges an amount that looks wrong, and you need evidence from a live run.
 ---
 
 # MuleRouter 渠道联调
@@ -76,7 +76,7 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 ### 第 3 步：读结果
 
-每个用例九项断言，完整数据写进 `--out`（默认 `/tmp/mulerouter-smoke-report.json`）：
+每个用例十项断言，完整数据写进 `--out`（默认 `/tmp/mulerouter-smoke-report.json`）：
 
 | 断言 | 检查什么 | 失败意味着 |
 |---|---|---|
@@ -89,6 +89,29 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 | `artifact_content` | 不带令牌 HEAD `content_url` 返回 200，`Content-Type` 是 `image/*` 或 `video/*` | 产物下载链路不通（插件的 `buildContentRequest`，或上游产物链接失效） |
 | `quota_charged` | 扣费 == `固定价 × 倍率 × 分组倍率 × QuotaPerUnit` | 计费链路和预期不符 |
 | `group_routed` | 消费日志的分组 == 目标分组 | 请求没落到目标分组的渠道上，测的不是你想测的渠道 |
+| `vendor_hidden` | 调用方能看到的五个响应里没有 `carrothub` 和 `muleusercontent`，见下文 | 调用方能看出背后是 MuleRouter |
+
+#### `vendor_hidden`：调用方看不到 MuleRouter
+
+GLOSSARY 规定调用方只见 Public model name，见不到 MuleRouter model name 和 MuleRouter 的结果 URL。这两样都带着 `carrothub`（MuleRouter model name 和结果 URL 的路径）或 `muleusercontent`（结果 URL 的域名），所以查这两个词就够了。
+
+**范围**：用例拿到任务 ID 后，不论终态，都读这五个响应：
+
+| 响应 | 怎么读 |
+|---|---|
+| `GET /v1/videos/{id}` | 中转令牌；图片任务这里返回报错，报错体照样查 |
+| `GET /v1/tasks/{id}` | 中转令牌 |
+| `GET /v1/tasks/{id}/artifacts` | 中转令牌 |
+| 控制台任务列表 `GET /api/task/self?task_id=` | 访问令牌 |
+| 使用日志 `GET /api/log/self` | 沿用 `quota_charged` 找到的那条消费日志 |
+
+`GET /v1/video/generations/{id}`、`platform: "mulerouter"` 和提交地址里的插件 key 不在范围内，见 #40。插件 key 是 `mulerouter`，不含这两个词，所以 `platform` 字段不会触发失败。
+
+**判定**：任何字段的字符串值里出现两个词之一（不分大小写）就失败。值本身是 JSON 字符串的（使用日志的 `other`）先拆开再查。
+
+**输出**：失败时 detail 逐条列出 `<响应> <字段路径> 含 <词>`，比如 `控制台任务列表 GET /api/task/self data.items[0].data.videos[0] 含 muleusercontent`。五个响应的完整内容写在报告每个用例的 `caller_views` 里。
+
+**花费**：只发 GET，不提交任务，不额外花钱；`--dry-run` 不跑这项。
 
 `quota_charged` 的复算刻意分两步取整（先把按次价折成基础额度，再乘倍率），因为 `relay_task.go` 就是这么算的，合成一次乘法会差 1 个额度。断言留了 ±1 容差吸收浮点误差 —— 数量级错误照样会被抓到。
 
@@ -139,6 +162,11 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 **额度对不上但每个用例都 PASS** —— 测试期间有其他请求在消费同一个账号。换一个专用账号重跑。
 
 **`group_routed` 失败** —— 令牌自己设了分组（或是 `auto` 分组），请求没走 `--group` 指的分组。换一个分组就是目标分组的令牌重跑；扣费结论对那个分组不成立。
+
+**`vendor_hidden` 失败** —— 按 detail 里的字段找来源：
+- `GET /v1/videos/{id}` 的 `metadata.*`：插件 `openai_video.render` 又带出了结果 URL。
+- `properties.upstream_model_name`（任务列表）或 `other.upstream_model_name`（使用日志）含 `carrothub`：渠道配了到 MuleRouter model name 的 `model_mapping`。删掉它，原因见 [ADR-0002](../../../docs/adr/0002-mulerouter-plugin-declares-public-model-names.md)。
+- 控制台任务列表的 `data.*`：这是宿主存下的上游原始响应，由宿主原样返回（`relay.TaskModel2Dto` 的 `Data`），插件管不到，要改宿主；把证据交给用户决定怎么处理。
 
 ## 上游价目
 

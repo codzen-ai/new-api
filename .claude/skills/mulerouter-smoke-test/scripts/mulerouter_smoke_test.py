@@ -453,6 +453,58 @@ def find_consume_log(client, model_name, since_ts, task_id, token_name, attempts
     return None
 
 
+def collect_caller_views(client, task_id, consume_log):
+    """收齐调用方能看到的、和这个任务有关的五个响应：四个现读（全是 GET，不提交、不花钱），
+    使用日志沿用 find_consume_log 读到的那条。非 200 的响应体照样收：报错文案调用方也看得到。
+    /v1/video/generations/{id} 不读，见 #40。"""
+    task_path = urllib.parse.quote(task_id)
+    views = {}
+    for label, path in (("GET /v1/videos/{id}", f"/v1/videos/{task_path}"),
+                        ("GET /v1/tasks/{id}", f"{TASK_PATH}/{task_path}"),
+                        ("GET /v1/tasks/{id}/artifacts", f"{TASK_PATH}/{task_path}/artifacts")):
+        _, _, views[label] = client.relay("GET", path)
+    _, _, views["控制台任务列表 GET /api/task/self"] = request_raw(
+        "GET", f"{client.base}/api/task/self?" + urllib.parse.urlencode({"task_id": task_id}),
+        client.account_token, extra_headers=client.account_headers)
+    views["使用日志 GET /api/log/self"] = consume_log or {}
+    return views
+
+
+# 调用方看到这两个词，就知道背后是 MuleRouter：carrothub 出在 MuleRouter model name 和结果
+# URL 的路径里，muleusercontent 是结果 URL 的域名。插件 key「mulerouter」不在其中 ——
+# platform 字段和提交地址带出它是 #40 的已知问题，不归这项检查管。
+VENDOR_NEEDLES = ("carrothub", "muleusercontent")
+
+
+def find_vendor_leaks(views):
+    """在调用方能看到的响应里找 VENDOR_NEEDLES。views 是 {响应名: 响应体}，
+    返回每处命中的响应名、字段路径和命中的词。"""
+    leaks = []
+    for response, body in views.items():
+        stack = [("", body)]
+        while stack:
+            path, value = stack.pop()
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    stack.append((f"{path}.{key}" if path else str(key), item))
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    stack.append((f"{path}[{index}]", item))
+            elif isinstance(value, str):
+                # 使用日志的 other 存的是 JSON 字符串，拆开才能报出里面的字段名。
+                if value.lstrip().startswith(("{", "[")):
+                    try:
+                        stack.append((path, json.loads(value)))
+                        continue
+                    except json.JSONDecodeError:
+                        pass
+                lowered = value.lower()
+                for needle in VENDOR_NEEDLES:
+                    if needle in lowered:
+                        leaks.append({"response": response, "field": path, "needle": needle})
+    return leaks
+
+
 def verify_case(result, case_name, ctx):
     case = CASES[case_name]
     group, group_ratio = ctx["group"], ctx["group_ratio"]
@@ -491,6 +543,12 @@ def verify_case(result, case_name, ctx):
         check("artifact_content", result.get("content_status") == 200
               and str(result.get("content_type", "")).startswith(case["artifact_type"] + "/"),
               f"HEAD content_url -> HTTP {result.get('content_status')}，Content-Type {result.get('content_type')}")
+
+    if "caller_views" in result:
+        leaks = find_vendor_leaks(result["caller_views"])
+        check("vendor_hidden", not leaks,
+              "；".join(f"{leak['response']} {leak['field']} 含 {leak['needle']}" for leak in leaks)
+              or f"{len(result['caller_views'])} 个响应里都没有 {'/'.join(VENDOR_NEEDLES)}")
 
     log = result.get("consume_log")
     if log is not None:
@@ -646,6 +704,7 @@ def main():
         if result.get("task_id"):
             result["consume_log"] = find_consume_log(
                 client, CASES[name]["model"], result["submitted_at"], result["task_id"], ctx["token_name"])
+            result["caller_views"] = collect_caller_views(client, result["task_id"], result["consume_log"])
             verify_case(result, name, ctx)
         results.append(result)
         if CASES[name]["produces_image"] and not image_url and result.get("artifacts"):
