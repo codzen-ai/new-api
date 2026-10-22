@@ -1,41 +1,36 @@
 // MuleRouter endpoints, keyed by MuleRouter model name ({vendor}/{model}/{action}).
 // A channel model_mapping turns the public model name into one of these keys;
-// prices stay keyed by the public model name.
+// prices stay keyed by the public model name, and the host charges that price
+// times the multipliers the endpoint reports.
 //
-// Each endpoint lists its billing fields with the semantics of the billing_vars
-// the removed Go channel stored, so a request is charged exactly what the Go
-// channel charged:
-// - int: an integer bounded by min/max or enum; the multiplier is value / divisor,
-//   and no divisor means the field is bounds-checked but not priced.
-// - enum: the stringified value looks up its multiplier in values.
-// - default (a string) bills an omitted or null field; source names the request
-//   field when it differs from the multiplier name.
-// video marks the endpoints that produce videos, which the OpenAI video API
-// serves.
+// Each endpoint declares what it produces (output: "image" or "video") and, in
+// fields, every request field that affects the price or must be bounded, keyed
+// by the field name the client and MuleRouter use:
+// - type "enum": the value, read as a string, must be a key of values.
+// - type "integer": an integer, written as a number or a numeric string, that
+//   must be a key of values when values is given, else lie in [min, max].
+// - A priced field names its multiplier and maps each allowed value to the
+//   multiplier it reports in values; an omitted or null priced field bills
+//   default. A field without a multiplier is only bounded.
 const ENDPOINTS = {
   "carrothub/z-image-spicy/generation": {
-    billing: [
+    output: "image",
+    fields: {
       // MuleRouter adds a flat fee for prompt rewriting: $0.001 on a $0.013 image.
-      { name: "prompt_extend", kind: "enum", values: { true: 1.076923, false: 1 }, default: "true" },
-      { name: "width", kind: "int", min: 256, max: 1536, default: "1024" },
-      { name: "height", kind: "int", min: 256, max: 1536, default: "1536" },
-    ],
+      prompt_extend: { type: "enum", values: { true: 1.076923, false: 1 }, default: true, multiplier: "prompt_extend" },
+      width: { type: "integer", min: 256, max: 1536 },
+      height: { type: "integer", min: 256, max: 1536 },
+    },
   },
   // Image edit: one flat price per call.
-  "carrothub/qwen-image-edit-spicy/generation": { billing: [] },
+  "carrothub/qwen-image-edit-spicy/generation": { output: "image", fields: {} },
   // Image to video, priced per second of output and by resolution.
   "carrothub/wan2.2-i2v-spicy/generation": {
-    video: true,
-    billing: [
-      // An omitted duration bills 5 seconds, as the Go channel billed it. On
-      // POST /v1/tasks/mulerouter a duration that is not 5 or 8 (5.5, "eight",
-      // 0) is refused before billing, as the Go channel refused it. Only POST
-      // /v1/videos differs: taskDuration drops a top-level duration it cannot
-      // read as a non-zero integer, so such a request bills 5 seconds and sends
-      // no duration.
-      { name: "seconds", source: "duration", kind: "int", enum: [5, 8], default: "5", divisor: 1 },
-      { name: "resolution", kind: "enum", values: { "480p": 1, "720p": 2 }, default: "480p" },
-    ],
+    output: "video",
+    fields: {
+      duration: { type: "integer", values: { 5: 5, 8: 8 }, default: 5, multiplier: "seconds" },
+      resolution: { type: "enum", values: { "480p": 1, "720p": 2 }, default: "480p", multiplier: "resolution" },
+    },
   },
 };
 
@@ -80,7 +75,7 @@ export const meta = {
   models: Object.keys(ENDPOINTS),
   fetchMode: "per_task",
   // The OpenAI video API serves only the endpoints that produce videos.
-  protocols: [{ name: "openai_video", models: Object.keys(ENDPOINTS).filter((name) => ENDPOINTS[name].video) }],
+  protocols: [{ name: "openai_video", models: Object.keys(ENDPOINTS).filter((name) => ENDPOINTS[name].output === "video") }],
 };
 
 function upstreamPath(modelName) {
@@ -96,7 +91,7 @@ function upstreamPath(modelName) {
 function endpointFor(ctx) {
   const name = ctx.upstreamModel || ctx.model;
   if (!Object.prototype.hasOwnProperty.call(ENDPOINTS, name)) throw new Error("this model is not available on this channel");
-  return { name: name, billing: ENDPOINTS[name].billing };
+  return { name: name, fields: ENDPOINTS[name].fields };
 }
 
 // The upstream body is the request minus the gateway's own fields, with vendor
@@ -129,54 +124,63 @@ function quoted(value) {
   return JSON.stringify(String(value));
 }
 
-// fieldRatio bounds one billing field, read from the request field source,
-// and returns its multiplier; 0 means the field is valid but does not affect
-// the price.
-function fieldRatio(field, source, raw) {
-  if (field.kind === "enum") {
+function hasKey(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+// allowedValue checks a field value against the endpoint's capabilities and
+// returns the key of values it is priced by.
+function allowedValue(field, name, raw) {
+  if (field.type === "enum") {
     const key = String(raw);
-    if (!Object.prototype.hasOwnProperty.call(field.values, key)) {
-      throw new Error("invalid value " + quoted(key) + " for " + source + ", allowed: " + Object.keys(field.values).sort().join(", "));
+    if (!hasKey(field.values, key)) {
+      throw new Error("invalid value " + quoted(key) + " for " + name + ", allowed: " + Object.keys(field.values).sort().join(", "));
     }
-    return field.values[key];
+    return key;
   }
   let value = raw;
   if (typeof raw === "string") {
     const text = raw.trim();
     if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)) {
-      throw new Error("invalid value for " + source + ": " + quoted(raw) + " is not a number");
+      throw new Error("invalid value for " + name + ": " + quoted(raw) + " is not a number");
     }
     value = Number(text);
   } else if (typeof raw !== "number") {
-    throw new Error("invalid value for " + source + ": " + String(raw) + " is not a number");
+    throw new Error("invalid value for " + name + ": " + String(raw) + " is not a number");
   }
-  if (!Number.isInteger(value)) throw new Error(source + " must be an integer, got " + String(raw));
-  if (field.enum && field.enum.indexOf(value) < 0) {
-    throw new Error("invalid value " + String(value) + " for " + source + ", allowed: " + field.enum.map(String).join(", "));
+  if (!Number.isInteger(value)) throw new Error(name + " must be an integer, got " + String(raw));
+  if (field.values) {
+    if (!hasKey(field.values, String(value))) {
+      const allowed = Object.keys(field.values).map(Number).sort((a, b) => a - b);
+      throw new Error("invalid value " + String(value) + " for " + name + ", allowed: " + allowed.join(", "));
+    }
+    return String(value);
   }
-  if (field.min !== undefined && value < field.min) throw new Error(source + " must be >= " + String(field.min));
-  if (field.max !== undefined && value > field.max) throw new Error(source + " must be <= " + String(field.max));
-  if (!field.divisor) return 0;
-  const ratio = value / field.divisor;
-  if (!(ratio > 0) || !Number.isFinite(ratio)) throw new Error(source + " produced a non-positive billing multiplier");
-  return ratio;
+  if (value < field.min) throw new Error(name + " must be >= " + String(field.min));
+  if (value > field.max) throw new Error(name + " must be <= " + String(field.max));
+  return String(value);
 }
 
-// billingRatios validates the body that will be sent upstream and returns the
-// multipliers it contributes, so metadata cannot carry a multiplier past it.
+// billingRatios validates the body that will be sent upstream against the
+// endpoint's capabilities and returns the multipliers it contributes, so
+// metadata cannot carry a multiplier past it.
 function billingRatios(endpoint, params) {
-  const declared = {};
   const ratios = {};
-  for (const field of endpoint.billing) {
-    const source = field.source || field.name;
-    declared[source] = true;
-    let raw = params[source];
-    if (raw === undefined || raw === null) raw = field.default;
-    const ratio = fieldRatio(field, source, raw);
-    if (ratio > 0) ratios[field.name] = ratio;
+  for (const name of Object.keys(endpoint.fields)) {
+    const field = endpoint.fields[name];
+    let raw = params[name];
+    if (raw === undefined || raw === null) {
+      if (!field.multiplier) continue;
+      raw = field.default;
+    }
+    const key = allowedValue(field, name, raw);
+    if (!field.multiplier) continue;
+    const ratio = field.values[key];
+    if (!(ratio > 0) || !Number.isFinite(ratio)) throw new Error(name + " produced a non-positive billing multiplier");
+    ratios[field.multiplier] = ratio;
   }
   const undeclared = Object.keys(params)
-    .filter((key) => !declared[key] && params[key] !== null && params[key] !== undefined && COST_FIELDS.indexOf(key) >= 0)
+    .filter((key) => !hasKey(endpoint.fields, key) && params[key] !== null && params[key] !== undefined && COST_FIELDS.indexOf(key) >= 0)
     .sort();
   if (undeclared.length) {
     throw new Error(
@@ -186,8 +190,7 @@ function billingRatios(endpoint, params) {
   return ratios;
 }
 
-// The Go channel refused a task without a prompt before charging; every
-// MuleRouter endpoint takes one. buildSubmitRequest applies it on every entry,
+// Every MuleRouter endpoint takes a prompt. buildSubmitRequest applies it on every entry,
 // before quota is reserved; the openai_video decoder applies it again so POST
 // /v1/videos refuses the request already at channel selection.
 function requirePrompt(body) {
