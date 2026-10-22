@@ -731,9 +731,29 @@ func TestMulerouterPluginReadsTasks(t *testing.T) {
 		require.Nil(t, taskErr)
 		assert.Equal(t, "up-1", id)
 
-		for _, body := range []string{`{"task_info":{"status":"pending"}}`, `{"task_info":{"id":"up-1","status":"failed","error":{"title":"bad_prompt","detail":"blocked"}}}`} {
-			_, taskErr = submit(body)
-			require.NotNil(t, taskErr, body)
+		_, taskErr = submit(`{"task_info":{"status":"pending"}}`)
+		require.NotNil(t, taskErr)
+
+		// A submission that fails synchronously carries its error where a
+		// failed poll does: under task_info (carrothub ErrorResponse) or at the
+		// top level (the async task guide).
+		for _, tc := range []struct{ name, body, reason string }{
+			{
+				"error under task_info",
+				`{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"failed","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:00:00Z","error":{"code":3001,"title":"Invalid Request","detail":"Task execution failed"}}}`,
+				"Invalid Request: Task execution failed (error code 3001)",
+			},
+			{
+				"error at the top level",
+				`{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"failed","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:02:13Z"},"error":{"title":"External service execution failed","error_code":3005,"detail":"Kling task failed: video generation failed due to prompt violation"}}`,
+				"External service execution failed: Kling task failed: video generation failed due to prompt violation (error code 3005)",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				_, taskErr := submit(tc.body)
+				require.NotNil(t, taskErr)
+				assert.Contains(t, taskErr.Message, tc.reason)
+			})
 		}
 	})
 
@@ -769,15 +789,31 @@ func TestMulerouterPluginReadsTasks(t *testing.T) {
 			url    string
 			reason string
 		}{
+			// Status words of the carrothub endpoint YAML: pending, processing,
+			// completed, failed. The wan2.2-i2v-spicy YAML also names retrying.
 			{"pending", `{"task_info":{"id":"up-1","status":"pending"}}`, model.TaskStatusSubmitted, "", ""},
 			{"processing", `{"task_info":{"id":"up-1","status":"processing"}}`, model.TaskStatusInProgress, "", ""},
+			{"retrying", `{"task_info":{"id":"up-1","status":"retrying"}}`, model.TaskStatusInProgress, "", ""},
 			{"completed image", `{"task_info":{"id":"up-1","status":"completed"},"images":["https://cdn/a.png","https://cdn/b.png"]}`, model.TaskStatusSuccess, "https://cdn/a.png", ""},
 			{"completed video", `{"task_info":{"id":"up-1","status":"completed"},"videos":["https://cdn/a.mp4"]}`, model.TaskStatusSuccess, "https://cdn/a.mp4", ""},
-			{"completed without artifacts", `{"task_info":{"id":"up-1","status":"completed"}}`, model.TaskStatusSuccess, "", ""},
-			{"failed with title and detail", `{"task_info":{"id":"up-1","status":"failed","error":{"code":400,"title":"bad_prompt","detail":"blocked"}}}`, model.TaskStatusFailure, "", "bad_prompt: blocked"},
-			{"failed with title only", `{"task_info":{"id":"up-1","status":"failed","error":{"title":"bad_prompt"}}}`, model.TaskStatusFailure, "", "bad_prompt"},
-			{"failed with detail only", `{"task_info":{"id":"up-1","status":"failed","error":{"detail":"blocked"}}}`, model.TaskStatusFailure, "", "blocked"},
+			// Status words of the async task guide: queued, running, succeeded,
+			// failed.
+			{"queued", `{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"queued","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:00:00Z"}}`, model.TaskStatusSubmitted, "", ""},
+			{"running", `{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"running","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:00:00Z"}}`, model.TaskStatusInProgress, "", ""},
+			{"succeeded", `{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"succeeded","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:00:00Z"},"videos":["https://example.com/video-749337402830284.mp4"]}`, model.TaskStatusSuccess, "https://example.com/video-749337402830284.mp4", ""},
+			// A success without any image, video or audio fails, so the host
+			// refunds the task.
+			{"completed without artifacts", `{"task_info":{"id":"up-1","status":"completed"}}`, model.TaskStatusFailure, "", "the task completed without producing any image, video or audio"},
+			{"succeeded with empty arrays", `{"task_info":{"id":"up-1","status":"succeeded"},"images":[],"videos":[],"audios":[]}`, model.TaskStatusFailure, "", "the task completed without producing any image, video or audio"},
+			// The carrothub ErrorResponse puts the error under task_info, the
+			// async task guide at the top level.
+			{"failed with the error under task_info", `{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"failed","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:00:00Z","error":{"code":3001,"title":"Invalid Request","detail":"Task execution failed"}}}`, model.TaskStatusFailure, "", "Invalid Request: Task execution failed (error code 3001)"},
+			{"failed with the error at the top level", `{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"failed","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:02:13Z"},"error":{"title":"External service execution failed","error_code":3005,"detail":"Kling task failed: video generation failed due to prompt violation"}}`, model.TaskStatusFailure, "", "External service execution failed: Kling task failed: video generation failed due to prompt violation (error code 3005)"},
+			{"failed with title only", `{"task_info":{"id":"up-1","status":"failed","error":{"title":"Invalid Request"}}}`, model.TaskStatusFailure, "", "Invalid Request"},
+			{"failed with detail only", `{"error":{"detail":"Task execution failed"},"task_info":{"id":"up-1","status":"failed"}}`, model.TaskStatusFailure, "", "Task execution failed"},
 			{"failed without an error", `{"task_info":{"id":"up-1","status":"failed"}}`, model.TaskStatusFailure, "", "task failed"},
+			// An unknown status is a failed poll, never progress.
+			{"unknown status", `{"task_info":{"id":"up-1","status":"paused"}}`, "UNKNOWN", "", "unknown task status: paused"},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -788,12 +824,6 @@ func TestMulerouterPluginReadsTasks(t *testing.T) {
 				assert.Equal(t, tc.reason, result.Reason)
 			})
 		}
-
-		// The Go adaptor counted an unknown state as a failed poll; the plugin
-		// reports UNKNOWN, which the host counts the same way.
-		pluginResult, err := pluginAdaptor.ParseTaskResult(task, &http.Response{StatusCode: http.StatusOK}, []byte(`{"task_info":{"id":"up-1","status":"paused"}}`))
-		require.NoError(t, err)
-		assert.Equal(t, "UNKNOWN", pluginResult.Status)
 	})
 }
 
