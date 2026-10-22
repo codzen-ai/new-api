@@ -387,12 +387,18 @@ curl -X POST "$BASE_URL/v1/videos" \
   "status": "completed",
   "progress": 100,
   "created_at": 1792504230,
-  "completed_at": 1792504283,
-  "metadata": { "url": "https://.../result_00.mp4" }
+  "completed_at": 1792504283
 }
 ```
 
-`status` 取值为 `queued`、`in_progress`、`completed`、`failed`。`completed_at` 和 `metadata.url` 只在 `completed` 时出现，未完成的任务只有前六个字段。失败的任务带 `error`，`message` 与 `/v1/tasks/{任务ID}` 的 `fail_reason` 相同：
+`status` 取值为 `queued`、`in_progress`、`completed`、`failed`。`completed_at` 只在 `completed` 时出现，未完成的任务只有前六个字段。查询结果里没有视频链接，任务完成后从 `GET $BASE_URL/v1/videos/{任务ID}/content` 下载视频，请求要带 `Authorization` 头：
+
+```bash
+curl -L "$BASE_URL/v1/videos/{任务ID}/content" \
+  -H "Authorization: Bearer $API_KEY" -o result.mp4
+```
+
+失败的任务带 `error`，`message` 与 `/v1/tasks/{任务ID}` 的 `fail_reason` 相同：
 
 ```json
 {

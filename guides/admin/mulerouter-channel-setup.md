@@ -193,7 +193,10 @@ Vendor parameter 写在顶层或 `metadata` 里都生效。`/v1/tasks/mulerouter
 
 ## 已知限制
 
-**部分响应仍暴露上游。** 图片和视频都可以通过网关下载：`/v1/tasks/{id}/artifacts` 返回的 `content_url` 指向本站，视频另有 `/v1/videos/{id}/content`，客户拿不到上游链接也能取到产物。但 `GET /v1/videos/{id}` 的 `metadata.url` 仍是上游结果 URL（形如 `https://mule-router-assets.muleusercontent.com/.../carrothub/...`），任务查询响应里的 `properties.upstream_model_name` 和 `data` 字段同样带内部信息。
+**部分响应仍暴露上游。** 图片和视频都通过网关下载：`/v1/tasks/{id}/artifacts` 返回的 `content_url` 指向本站，视频另有 `/v1/videos/{id}/content`，`GET /v1/videos/{id}` 不返回上游结果 URL。还有两处没处理，见 [#40](https://github.com/codzen-ai/new-api/issues/40)：
+
+- `GET /v1/video/generations/{id}` 返回整个任务记录，包括 `platform`、`properties`、`data`（上游原始响应，含上游任务 ID 和厂商域名下的结果 URL）等字段。这条路由写死在宿主里，插件管不到。
+- 插件 key 是 `mulerouter`，所以提交地址 `POST /v1/tasks/mulerouter`，以及任务查询响应和控制台任务列表里的 `platform`，都带着厂商名。
 
 **轮询容量共享。** 所有异步任务平台共用一个轮询池（默认单轮最多取 1000 条未完成任务），任务量大时可能挤占其他平台的轮询。量上来后可以在渠道设置里开启「跳过任务轮询间隔」，并关注未完成任务总数。
 
