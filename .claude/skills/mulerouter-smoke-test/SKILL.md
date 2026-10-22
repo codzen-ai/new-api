@@ -145,22 +145,22 @@ GLOSSARY 规定调用方只见 Public model name，见不到 MuleRouter model na
 
 | 概念 | 位置 |
 |---|---|
-| 端点表 | `ENDPOINTS` 能力表（键即 MuleRouter model name `{vendor}/{model}/{action}`；每个端点有 `produces`、`action`） |
+| 端点表 | `ENDPOINTS` 能力表（键即 Public model name；每个端点的 `mulerouterModel` 是它对应的 MuleRouter model name `{vendor}/{model}/{action}`，另有 `produces`、`action`） |
 | 计费声明 | 同一张表里每个端点的 `fields`：`values` 是取值到倍率的映射，`ratio` 是宿主收到的倍率名，`default` 是缺省时的计费值 |
 | 成本字段黑名单 | `COST_FIELDS` |
 | `/v1/videos` 解码 | `OPENAI_VIDEO_FIELDS`（`seconds`/`size`/`input_reference` 的映射），视频端点的 `params`（允许透传的字段） |
 | 响应解析 | `parseSubmitResponse` / `parseTaskResult` / `TASK_STATUSES` / `failureReason` |
 | 产物 | `listArtifacts` / `buildContentRequest` |
 
-这些是代码，改完要重新部署（见 [ADR-0001](../../../docs/adr/0001-mulerouter-endpoints-live-in-a-task-plugin.md)）。渠道上能改的只有模型列表、「模型重定向」、Base URL 和密钥；价格在模型固定价格里。
+这些是代码，改完要重新部署（见 [ADR-0001](../../../docs/adr/0001-mulerouter-endpoints-live-in-a-task-plugin.md)）。渠道上能改的只有模型列表、Base URL 和密钥，「模型重定向」留空（见 [ADR-0002](../../../docs/adr/0002-mulerouter-plugin-declares-public-model-names.md)）；价格在模型固定价格里。
 
 ## 排障
 
 **提交 400 `model_price_error` / 「模型倍率未配置」** —— 模型没配固定价格。预检本该拦住，说明跑的时候跳过了预检。
 
-**提交 503「无可用渠道」** —— 先确认提交地址是 `/v1/tasks/mulerouter`：`/v1/video/generations` 到不了插件渠道。地址对的话，是目标分组里没有绑定 `mulerouter` 插件的渠道提供这个名字（报错里带着分组名，先确认分组对不对），或渠道的模型列表里没有这个名字。客户端用的是短名（`z-image-spicy`），渠道需要同时配好模型列表和「模型重定向」把短名映射到三段式内部名 `{vendor}/{model}/{action}`。
+**提交 503「无可用渠道」** —— 先确认提交地址是 `/v1/tasks/mulerouter`：`/v1/video/generations` 到不了插件渠道。地址对的话，是目标分组里没有绑定 `mulerouter` 插件的渠道提供这个名字（报错里带着分组名，先确认分组对不对），或渠道的模型列表里没有这个名字。客户端用的是 Public model name（`z-image-spicy`），渠道的模型列表只填这个名字，不配「模型重定向」。
 
-**提交报 `this model is not available on this channel`** —— 名字在渠道模型列表里，但重定向后的三段式名字不在端点表里。检查两者是否对齐。
+**提交报 `this model is not available on this channel`** —— 名字在渠道模型列表里，但插件不认它：重定向后的名字不是 `ENDPOINTS` 的键。最常见的原因是渠道还配着到三段式 `carrothub/...` 的「模型重定向」，删掉即可；配了别名重定向的，检查目标是否和 `ENDPOINTS` 的键一字不差。
 
 **提交 400 且报某个字段"影响成本但未声明"** —— 请求里（顶层或 `metadata` 里）带了成本字段黑名单里的键（`n`/`duration`/`resolution`/`size`/`width`/`height` 等）而该 endpoint 没声明它。这是设计行为不是 bug：在该端点的 `fields` 里给它加一条带取值范围的声明，或者别传这个字段。
 
