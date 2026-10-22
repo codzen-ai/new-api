@@ -220,16 +220,24 @@ export function extractUsage(ctx) {
   return billingRatios(endpointFor(ctx), upstreamParams(ctx.requestBody));
 }
 
-function errorMessage(error) {
-  if (!error) return "";
-  if (error.title && error.detail) return error.title + ": " + error.detail;
-  return error.title || error.detail || "";
+// failureReason reads a failed task's error: the carrothub endpoints put it
+// under task_info.error with a code, the async task guide at the top-level
+// error with an error_code. It returns the title, the detail and the code
+// that are present, or "" when neither place has an error.
+function failureReason(body) {
+  const info = (body && body.task_info) || {};
+  const error = info.error || (body && body.error);
+  if (!error || typeof error !== "object") return "";
+  let reason = error.title && error.detail ? error.title + ": " + error.detail : error.title || error.detail || "";
+  const code = error.error_code !== undefined && error.error_code !== null ? error.error_code : error.code;
+  if (code !== undefined && code !== null && code !== "") reason += (reason ? " " : "") + "(error code " + String(code) + ")";
+  return reason;
 }
 
 export function parseSubmitResponse(_ctx, resp) {
   const info = resp.body && resp.body.task_info;
+  if (info && info.status === "failed") throw new Error("task failed: " + (failureReason(resp.body) || "no reason given"));
   if (!info || !info.id) throw new Error("upstream returned no task id");
-  if (info.status === "failed") throw new Error("task failed: " + errorMessage(info.error));
   return { taskId: info.id, taskData: resp.body };
 }
 
@@ -245,12 +253,26 @@ export function buildQueryRequest(ctx) {
   };
 }
 
-const TASK_STATUSES = { pending: "SUBMITTED", processing: "IN_PROGRESS", completed: "SUCCESS", failed: "FAILURE" };
+// The carrothub endpoint YAML says pending / processing / retrying /
+// completed / failed; the async task guide says queued / running / succeeded /
+// failed. Any other word is UNKNOWN, which the host counts as a failed poll.
+const TASK_STATUSES = {
+  pending: "SUBMITTED",
+  queued: "SUBMITTED",
+  processing: "IN_PROGRESS",
+  running: "IN_PROGRESS",
+  retrying: "IN_PROGRESS",
+  completed: "SUCCESS",
+  succeeded: "SUCCESS",
+  failed: "FAILURE",
+};
 
 // A completed task carries its results under images, videos or audios.
 function resultURL(body) {
   for (const key of ["images", "videos", "audios"]) {
-    if (Array.isArray(body[key]) && body[key].length) return body[key][0];
+    if (!Array.isArray(body[key])) continue;
+    const url = body[key].find((item) => typeof item === "string" && item !== "");
+    if (url) return url;
   }
   return "";
 }
@@ -260,10 +282,12 @@ export function parseTaskResult(_ctx, body) {
   const status = TASK_STATUSES[info.status];
   if (!status) return { status: "UNKNOWN", reason: "unknown task status: " + String(info.status || "") };
   if (status === "SUCCESS") {
+    // A success with nothing to deliver fails, so the host refunds it.
     const url = resultURL(body);
-    return url ? { status: status, url: url } : { status: status };
+    if (!url) return { status: "FAILURE", reason: "the task completed without producing any image, video or audio" };
+    return { status: status, url: url };
   }
-  if (status === "FAILURE") return { status: status, reason: errorMessage(info.error) || "task failed" };
+  if (status === "FAILURE") return { status: status, reason: failureReason(body) || "task failed" };
   return { status: status };
 }
 
