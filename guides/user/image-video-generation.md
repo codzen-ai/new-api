@@ -72,7 +72,7 @@ Content-Type: application/json
 
 ### 第一步：提交任务
 
-`model`、`prompt`、`image`、`duration` 这几个通用参数写在请求体顶层；其余参数是某个模型专属的（如 `width`、`resolution`、`seed`），建议放在 `metadata` 对象里，详见[参数放在哪里](#参数放在哪里)：
+`model`、`prompt`、`image`、`duration` 这几个通用参数写在请求体顶层；其余参数是某个模型专属的（如 `width`、`resolution`、`seed`），写在顶层或 `metadata` 对象里都可以，本文示例放在 `metadata` 里，详见[参数放在哪里](#参数放在哪里)：
 
 ```bash
 curl -X POST "$BASE_URL/v1/tasks/mulerouter" \
@@ -155,10 +155,10 @@ curl -o result.png "<content_url>"
 
 请求体里的参数分两类：
 
-| 类别 | 参数 | 建议位置 |
+| 类别 | 参数 | 位置 |
 |---|---|---|
 | 通用参数 | `model`、`prompt`、`image`、`duration` | 请求体**顶层** |
-| 模型专属参数 | 其余参数，如 `width`、`height`、`prompt_extend`、`seed`、`last_image`、`resolution` | **`metadata` 对象**里 |
+| 模型专属参数 | 其余参数，如 `width`、`height`、`prompt_extend`、`seed`、`last_image`、`resolution` | 顶层或 **`metadata` 对象**里，两处都生效 |
 
 ```json
 {
@@ -173,11 +173,11 @@ curl -o result.png "<content_url>"
 }
 ```
 
-在 `POST /v1/tasks/mulerouter` 上，模型专属参数写在顶层也会生效，并按实际取值计费；同一个参数顶层和 `metadata` 都写时以 `metadata` 为准。但视频的 `POST /v1/videos` 只认 `metadata` 里的模型专属参数，写在顶层的会被忽略、按默认值生成和计费——例如把 `"resolution": "720p"` 写在顶层，在 `/v1/videos` 上得到的是按 480p 生成、按 480p 计费的视频。所以模型专属参数请统一写在 `metadata` 里，这样两个接口的结果和扣费完全一样。
+模型专属参数写在顶层或 `metadata` 里，在 `POST /v1/tasks/mulerouter` 和 `POST /v1/videos` 上都生效，并按实际取值生成和计费。同一个参数顶层和 `metadata` 都写时：`/v1/tasks/mulerouter` 以 `metadata` 为准；`/v1/videos` 要求两处的值一致，不一致返回 400。
 
 `metadata` 必须是 JSON 对象，不要写成字符串。
 
-下面各表的「位置」一列标明了每个参数建议放哪里。
+下面各表的「位置」一列是本文示例用的位置；写「`metadata`」的参数也可以写在顶层。
 
 ### z-image-spicy（文生图）
 
@@ -278,6 +278,8 @@ curl "$BASE_URL/v1/tasks/{任务ID}" -H "Authorization: Bearer $API_KEY"
 | `SUCCESS` | 完成 | [获取产物](#获取产物) |
 | `FAILURE` | 失败 | 看 `fail_reason`，已扣费用自动退还 |
 
+任务失败时，`fail_reason` 尽量给出生成服务的具体原因，包括错误标题、详情和错误码，例如 `Invalid Request: Task execution failed (error code 3001)`，方便你判断是提示词违规、参数问题还是服务故障。生成服务报告完成却没有返回任何图片或视频时，任务同样判为 `FAILURE`，原因是 `the task completed without producing any image, video or audio`，费用自动退还。
+
 `finished_at` 在任务结束前是 `0`。
 
 **轮询建议**：本站每 15 秒同步一次任务状态，查得比这更频繁不会更快拿到结果。
@@ -329,21 +331,51 @@ curl "$BASE_URL/v1/tasks/{任务ID}/artifacts" -H "Authorization: Bearer $API_KE
 下载视频  GET   $BASE_URL/v1/videos/{任务ID}/content
 ```
 
-提交的请求体和 `/v1/tasks/mulerouter` 一样，但**模型专属参数只认 `metadata` 里的**（见[参数放在哪里](#参数放在哪里)）：
+提交的请求体是 JSON 对象，除了[模型参数](#wan22-i2v-spicy图生视频)里的写法，还接受 OpenAI Video API 的标准字段：
+
+| OpenAI 字段 | 等同于 | 说明 |
+|---|---|---|
+| `seconds` | `duration` | 视频时长（秒），可以写成字符串 `"8"` 或数字。只能是 5 或 8 |
+| `size` | `resolution` | 形如 `宽x高`，按短边换算：`1280x720`、`720x1280` 是 `720p`，`854x480`、`480x832` 是 `480p`。短边只能是 480 或 720 |
+| `input_reference` | `image` | 首帧图片的链接 |
+
+用 OpenAI 写法提交一段 8 秒 480p 的竖屏视频：
 
 ```bash
 curl -X POST "$BASE_URL/v1/videos" \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{
     "model": "wan2.2-i2v-spicy",
-    "prompt": "镜头缓缓推进",
-    "image": "https://example.com/first-frame.png",
-    "duration": 8,
-    "metadata": {
-      "resolution": "720p"
-    }
+    "prompt": "orbit",
+    "image": "https://cdn/in.png",
+    "seconds": "8",
+    "size": "480x832"
   }'
 ```
+
+模型专属参数写在顶层或 `metadata` 里都生效，下面这条按 5 秒 720p 生成和计费：
+
+```bash
+curl -X POST "$BASE_URL/v1/videos" \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "model": "wan2.2-i2v-spicy",
+    "prompt": "orbit",
+    "image": "https://cdn/in.png",
+    "resolution": "720p",
+    "seed": 7,
+    "prompt_extend": false,
+    "last_image": "https://cdn/last.png"
+  }'
+```
+
+`/v1/videos` 的请求比 `/v1/tasks/mulerouter` 校验得更严：
+
+- **同一个参数只能有一个值。** `seconds` 和 `duration`、`size` 和 `resolution`、`input_reference` 和 `image`、顶层和 `metadata` 里的同名参数，同时写时值必须一致，否则返回 400。
+- **不认识的字段直接拒绝。** 模型不接受的字段（例如 `mode`）返回 400，不会被悄悄忽略。
+- **图片只接受链接。** `image`、`input_reference` 必须是 `http`/`https` 链接，不支持 base64，也不支持 multipart 上传文件。
+
+`seconds`、`size`、`input_reference` 只在 `/v1/videos` 上有效；在 `/v1/tasks/mulerouter` 上请写 `duration`、`resolution`、`image`，传 `seconds` 或 `size` 会被拒绝。
 
 查询返回：
 
@@ -423,6 +455,10 @@ HTTP 状态码非 2xx，响应体形如：
 | `width must be <= 1536` | 尺寸超出 256 – 1536 |
 | `affect the price of this model and are not enabled on this endpoint` | 你传了一个会影响价格但这个模型不支持的参数（如给图片模型传 `duration`），去掉它 |
 | `plugin usage value must be a number` | `duration` 等数值参数写成了非数字 |
+| `are not supported by this model` | `/v1/videos` 上传了这个模型不接受的字段（如 `mode`），去掉它 |
+| `give different values` | `/v1/videos` 上同一个参数用两种写法给了不同的值（如 `seconds: "8"` 和 `duration: 5`），只留一种 |
+| `size must be WIDTHxHEIGHT` | `size` 要写成 `1280x720` 这样的 `宽x高` |
+| `input_reference must be an image URL` | `/v1/videos` 的 `input_reference` 或 `image` 不是 `http`/`https` 链接 |
 
 查询和取产物时任务 ID 不对，返回 404。
 
@@ -552,6 +588,6 @@ curl "$BASE_URL/v1/tasks/task_AbCdEfGhIjKlMnOpQrStUvWxYz012345/artifacts" \
 
 **内容审核**：提示词和产物都会经过审核，被拒绝的任务返回 `FAILURE` 并附带原因，费用自动退还。
 
-**图片输入**：`image` 和 `last_image` 支持公网链接或 base64。用链接时确保生成服务能访问到——内网地址、需要登录才能打开的链接都会导致任务失败。base64 建议不超过 10 MB。
+**图片输入**：在 `/v1/tasks/mulerouter` 上，`image` 和 `last_image` 支持公网链接或 base64；`/v1/videos` 的 `image` 和 `input_reference` 只支持链接。用链接时确保生成服务能访问到——内网地址、需要登录才能打开的链接都会导致任务失败。base64 建议不超过 10 MB。
 
-**参数位置**：`model`、`prompt`、`image`、`duration` 写在请求体顶层，其余模型专属参数（`width`、`height`、`prompt_extend`、`seed`、`last_image`、`resolution`）写在 `metadata` 对象里，见[参数放在哪里](#参数放在哪里)。
+**参数位置**：`model`、`prompt`、`image`、`duration` 写在请求体顶层，其余模型专属参数（`width`、`height`、`prompt_extend`、`seed`、`last_image`、`resolution`）写在顶层或 `metadata` 对象里都生效，见[参数放在哪里](#参数放在哪里)。

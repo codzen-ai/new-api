@@ -25,5 +25,5 @@ The short, vendor-neutral name a client sends for a MuleRouter endpoint, such as
 _Avoid_: Alias, short name, client model
 
 **Vendor parameter**:
-A request field specific to one MuleRouter endpoint (such as width or prompt_extend), outside the gateway's unified task vocabulary. Clients send vendor parameters under `metadata`.
+A request field specific to one MuleRouter endpoint (such as width or prompt_extend), outside the gateway's unified task vocabulary. Clients send vendor parameters at the top level of the request or under `metadata`; both count.
 _Avoid_: Top-level field, vendor field, extra parameter
