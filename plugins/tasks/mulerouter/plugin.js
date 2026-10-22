@@ -1,41 +1,44 @@
 // MuleRouter endpoints, keyed by MuleRouter model name ({vendor}/{model}/{action}).
 // A channel model_mapping turns the public model name into one of these keys;
-// prices stay keyed by the public model name.
+// prices stay keyed by the public model name, and a request is charged that
+// price times the multipliers its fields select here.
 //
-// Each endpoint lists its billing fields with the semantics of the billing_vars
-// the removed Go channel stored, so a request is charged exactly what the Go
-// channel charged:
-// - int: an integer bounded by min/max or enum; the multiplier is value / divisor,
-//   and no divisor means the field is bounds-checked but not priced.
-// - enum: the stringified value looks up its multiplier in values.
-// - default (a string) bills an omitted or null field; source names the request
-//   field when it differs from the multiplier name.
-// video marks the endpoints that produce videos, which the OpenAI video API
-// serves.
+// Each endpoint declares what it produces (image or video), the action its
+// tasks are filed under on every entry, and, under fields, every request
+// field, by its MuleRouter name, that affects the price or needs a bound:
+// - values maps each allowed value to its multiplier, which the host receives
+//   under the name ratio; default is the value an omitted or null field is
+//   billed as.
+// - min and max bound a field that does not affect the price.
+// - integer requires a whole number, written as a JSON number or a numeric
+//   string.
+// An endpoint that produces videos also lists under params the other request
+// fields MuleRouter takes; the OpenAI video API refuses any field outside
+// fields and params.
+// Request validation and the billing multipliers are both derived from this
+// table, and the OpenAI video API serves the endpoints that produce videos.
 const ENDPOINTS = {
   "carrothub/z-image-spicy/generation": {
-    billing: [
+    produces: "image",
+    action: "text_to_image",
+    fields: {
       // MuleRouter adds a flat fee for prompt rewriting: $0.001 on a $0.013 image.
-      { name: "prompt_extend", kind: "enum", values: { true: 1.076923, false: 1 }, default: "true" },
-      { name: "width", kind: "int", min: 256, max: 1536, default: "1024" },
-      { name: "height", kind: "int", min: 256, max: 1536, default: "1536" },
-    ],
+      prompt_extend: { ratio: "prompt_extend", values: { true: 1.076923, false: 1 }, default: true },
+      width: { integer: true, min: 256, max: 1536 },
+      height: { integer: true, min: 256, max: 1536 },
+    },
   },
   // Image edit: one flat price per call.
-  "carrothub/qwen-image-edit-spicy/generation": { billing: [] },
+  "carrothub/qwen-image-edit-spicy/generation": { produces: "image", action: "image_to_image", fields: {} },
   // Image to video, priced per second of output and by resolution.
   "carrothub/wan2.2-i2v-spicy/generation": {
-    video: true,
-    billing: [
-      // An omitted duration bills 5 seconds, as the Go channel billed it. On
-      // POST /v1/tasks/mulerouter a duration that is not 5 or 8 (5.5, "eight",
-      // 0) is refused before billing, as the Go channel refused it. Only POST
-      // /v1/videos differs: taskDuration drops a top-level duration it cannot
-      // read as a non-zero integer, so such a request bills 5 seconds and sends
-      // no duration.
-      { name: "seconds", source: "duration", kind: "int", enum: [5, 8], default: "5", divisor: 1 },
-      { name: "resolution", kind: "enum", values: { "480p": 1, "720p": 2 }, default: "480p" },
-    ],
+    produces: "video",
+    action: "image_to_video",
+    fields: {
+      duration: { ratio: "seconds", integer: true, values: { 5: 5, 8: 8 }, default: 5 },
+      resolution: { ratio: "resolution", values: { "480p": 1, "720p": 2 }, default: "480p" },
+    },
+    params: ["prompt", "image", "last_image", "prompt_extend", "seed"],
   },
 };
 
@@ -73,14 +76,14 @@ export const meta = {
     en: "Asynchronous image and video generation through MuleRouter",
     zh: "通过 MuleRouter 异步生成图片和视频",
   },
-  version: "1.1.0",
+  version: "1.2.0",
   author: { name: "codzen" },
   baseUrl: "https://api.mulerouter.ai",
   upstreams: ["vendor"],
   models: Object.keys(ENDPOINTS),
   fetchMode: "per_task",
   // The OpenAI video API serves only the endpoints that produce videos.
-  protocols: [{ name: "openai_video", models: Object.keys(ENDPOINTS).filter((name) => ENDPOINTS[name].video) }],
+  protocols: [{ name: "openai_video", models: Object.keys(ENDPOINTS).filter((name) => ENDPOINTS[name].produces === "video") }],
 };
 
 function upstreamPath(modelName) {
@@ -95,8 +98,9 @@ function upstreamPath(modelName) {
 // MuleRouter model name behind the public model name.
 function endpointFor(ctx) {
   const name = ctx.upstreamModel || ctx.model;
-  if (!Object.prototype.hasOwnProperty.call(ENDPOINTS, name)) throw new Error("this model is not available on this channel");
-  return { name: name, billing: ENDPOINTS[name].billing };
+  if (!Object.hasOwn(ENDPOINTS, name)) throw new Error("this model is not available on this channel");
+  const endpoint = ENDPOINTS[name];
+  return { name: name, action: endpoint.action, fields: endpoint.fields, params: endpoint.params || [] };
 }
 
 // The upstream body is the request minus the gateway's own fields, with vendor
@@ -105,18 +109,6 @@ function upstreamParams(requestBody) {
   const params = {};
   const body = requestBody || {};
   for (const key of Object.keys(body)) params[key] = body[key];
-  // On POST /v1/videos taskRequestBody copies a lone image into images
-  // ([image]), as the host's task request did for the Go channel, and the Go
-  // adaptor sent only the image the client wrote; dropping the copy here sends
-  // the same body. POST /v1/tasks/mulerouter hands over the client's body
-  // unchanged, so there the rule only matters to a client that itself sends
-  // image and images with the same single URL: the Go adaptor sent both, the
-  // plugin sends only image. Both name the same single input image and
-  // neither field is priced, so the charge is the same.
-  const images = params.images;
-  if (typeof params.image === "string" && Array.isArray(images) && images.length === 1 && images[0] === params.image) {
-    delete params.images;
-  }
   const metadata = body.metadata;
   if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
     for (const key of Object.keys(metadata)) params[key] = metadata[key];
@@ -129,54 +121,58 @@ function quoted(value) {
   return JSON.stringify(String(value));
 }
 
-// fieldRatio bounds one billing field, read from the request field source,
-// and returns its multiplier; 0 means the field is valid but does not affect
-// the price.
-function fieldRatio(field, source, raw) {
-  if (field.kind === "enum") {
-    const key = String(raw);
-    if (!Object.prototype.hasOwnProperty.call(field.values, key)) {
-      throw new Error("invalid value " + quoted(key) + " for " + source + ", allowed: " + Object.keys(field.values).sort().join(", "));
-    }
-    return field.values[key];
-  }
-  let value = raw;
-  if (typeof raw === "string") {
-    const text = raw.trim();
-    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)) {
-      throw new Error("invalid value for " + source + ": " + quoted(raw) + " is not a number");
-    }
-    value = Number(text);
-  } else if (typeof raw !== "number") {
-    throw new Error("invalid value for " + source + ": " + String(raw) + " is not a number");
-  }
-  if (!Number.isInteger(value)) throw new Error(source + " must be an integer, got " + String(raw));
-  if (field.enum && field.enum.indexOf(value) < 0) {
-    throw new Error("invalid value " + String(value) + " for " + source + ", allowed: " + field.enum.map(String).join(", "));
-  }
-  if (field.min !== undefined && value < field.min) throw new Error(source + " must be >= " + String(field.min));
-  if (field.max !== undefined && value > field.max) throw new Error(source + " must be <= " + String(field.max));
-  if (!field.divisor) return 0;
-  const ratio = value / field.divisor;
-  if (!(ratio > 0) || !Number.isFinite(ratio)) throw new Error(source + " produced a non-positive billing multiplier");
-  return ratio;
-}
-
-// billingRatios validates the body that will be sent upstream and returns the
-// multipliers it contributes, so metadata cannot carry a multiplier past it.
+// billingRatios validates the body that will be sent upstream against the
+// endpoint's fields and returns the multipliers they select, so metadata
+// cannot carry a multiplier past it.
 function billingRatios(endpoint, params) {
-  const declared = {};
   const ratios = {};
-  for (const field of endpoint.billing) {
-    const source = field.source || field.name;
-    declared[source] = true;
-    let raw = params[source];
-    if (raw === undefined || raw === null) raw = field.default;
-    const ratio = fieldRatio(field, source, raw);
-    if (ratio > 0) ratios[field.name] = ratio;
+  for (const name of Object.keys(endpoint.fields)) {
+    const field = endpoint.fields[name];
+    let raw = params[name];
+    if (raw === undefined || raw === null) {
+      if (field.default === undefined) continue;
+      raw = field.default;
+    }
+    let key;
+    if (field.integer) {
+      let value = raw;
+      if (typeof raw === "string") {
+        const text = raw.trim();
+        if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)) {
+          throw new Error("invalid value for " + name + ": " + quoted(raw) + " is not a number");
+        }
+        value = Number(text);
+      } else if (typeof raw !== "number") {
+        throw new Error("invalid value for " + name + ": " + String(raw) + " is not a number");
+      }
+      if (!Number.isInteger(value)) throw new Error(name + " must be an integer, got " + String(raw));
+      if (field.min !== undefined && value < field.min) throw new Error(name + " must be >= " + String(field.min));
+      if (field.max !== undefined && value > field.max) throw new Error(name + " must be <= " + String(field.max));
+      // A field without values is bounded but does not affect the price.
+      if (!field.values) continue;
+      key = String(value);
+      // Integer keys enumerate in ascending order.
+      if (!Object.hasOwn(field.values, key)) {
+        throw new Error("invalid value " + key + " for " + name + ", allowed: " + Object.keys(field.values).join(", "));
+      }
+    } else {
+      key = String(raw);
+      if (!Object.hasOwn(field.values, key)) {
+        throw new Error("invalid value " + quoted(key) + " for " + name + ", allowed: " + Object.keys(field.values).sort().join(", "));
+      }
+    }
+    const ratio = field.values[key];
+    if (!(ratio > 0) || !Number.isFinite(ratio)) throw new Error(name + " produced a non-positive billing multiplier");
+    ratios[field.ratio] = ratio;
   }
   const undeclared = Object.keys(params)
-    .filter((key) => !declared[key] && params[key] !== null && params[key] !== undefined && COST_FIELDS.indexOf(key) >= 0)
+    .filter(
+      (key) =>
+        !Object.hasOwn(endpoint.fields, key) &&
+        params[key] !== null &&
+        params[key] !== undefined &&
+        COST_FIELDS.indexOf(key) >= 0
+    )
     .sort();
   if (undeclared.length) {
     throw new Error(
@@ -186,8 +182,8 @@ function billingRatios(endpoint, params) {
   return ratios;
 }
 
-// The Go channel refused a task without a prompt before charging; every
-// MuleRouter endpoint takes one. buildSubmitRequest applies it on every entry,
+// Every MuleRouter endpoint takes a prompt, so a task without one is refused
+// before charging. buildSubmitRequest applies it on every entry,
 // before quota is reserved; the openai_video decoder applies it again so POST
 // /v1/videos refuses the request already at channel selection.
 function requirePrompt(body) {
@@ -204,6 +200,7 @@ export function buildSubmitRequest(ctx) {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + ctx.apiKey },
     body: params,
+    action: endpoint.action,
   };
 }
 
@@ -213,16 +210,29 @@ export function extractUsage(ctx) {
   return billingRatios(endpointFor(ctx), upstreamParams(ctx.requestBody));
 }
 
-function errorMessage(error) {
-  if (!error) return "";
-  if (error.title && error.detail) return error.title + ": " + error.detail;
-  return error.title || error.detail || "";
+// failureReason reads a task's error: the carrothub endpoints put it under
+// task_info.error with a code, the async task guide at the top-level error
+// with an error_code. It returns the title, the detail and the code of the
+// first of the two that has any, or "" when neither does.
+function failureReason(body) {
+  const info = (body && body.task_info) || {};
+  for (const error of [info.error, body && body.error]) {
+    if (!error || typeof error !== "object") continue;
+    let reason = error.title && error.detail ? error.title + ": " + error.detail : error.title || error.detail || "";
+    const code = error.error_code !== undefined && error.error_code !== null ? error.error_code : error.code;
+    if (code !== undefined && code !== null && code !== "") reason += (reason ? " " : "") + "(error code " + String(code) + ")";
+    if (reason) return reason;
+  }
+  return "";
 }
 
+// A submission fails when MuleRouter says so, or when it returns an error
+// instead of a task.
 export function parseSubmitResponse(_ctx, resp) {
   const info = resp.body && resp.body.task_info;
-  if (!info || !info.id) throw new Error("upstream returned no task id");
-  if (info.status === "failed") throw new Error("task failed: " + errorMessage(info.error));
+  const reason = failureReason(resp.body);
+  if (info && info.status === "failed") throw new Error("task failed: " + (reason || "no reason given"));
+  if (!info || !info.id) throw new Error(reason ? "task failed: " + reason : "upstream returned no task id");
   return { taskId: info.id, taskData: resp.body };
 }
 
@@ -238,12 +248,31 @@ export function buildQueryRequest(ctx) {
   };
 }
 
-const TASK_STATUSES = { pending: "SUBMITTED", processing: "IN_PROGRESS", completed: "SUCCESS", failed: "FAILURE" };
+// The carrothub endpoint YAML says pending / processing / completed / failed,
+// and the carrothub wan2.2-i2v-spicy YAML adds retrying; the async task guide
+// says queued / running / succeeded / failed. Any other word is UNKNOWN,
+// which the host counts as a failed poll.
+const TASK_STATUSES = {
+  pending: "SUBMITTED",
+  queued: "SUBMITTED",
+  processing: "IN_PROGRESS",
+  running: "IN_PROGRESS",
+  retrying: "IN_PROGRESS",
+  completed: "SUCCESS",
+  succeeded: "SUCCESS",
+  failed: "FAILURE",
+};
+
+// firstURL is the first non-empty string of a result list, or "".
+function firstURL(list) {
+  return (Array.isArray(list) && list.find((item) => typeof item === "string" && item !== "")) || "";
+}
 
 // A completed task carries its results under images, videos or audios.
 function resultURL(body) {
   for (const key of ["images", "videos", "audios"]) {
-    if (Array.isArray(body[key]) && body[key].length) return body[key][0];
+    const url = firstURL(body[key]);
+    if (url) return url;
   }
   return "";
 }
@@ -253,18 +282,20 @@ export function parseTaskResult(_ctx, body) {
   const status = TASK_STATUSES[info.status];
   if (!status) return { status: "UNKNOWN", reason: "unknown task status: " + String(info.status || "") };
   if (status === "SUCCESS") {
+    // A success with nothing to deliver fails, so the host refunds it.
     const url = resultURL(body);
-    return url ? { status: status, url: url } : { status: status };
+    if (!url) return { status: "FAILURE", reason: "the task completed without producing any image, video or audio" };
+    return { status: status, url: url };
   }
-  if (status === "FAILURE") return { status: status, reason: errorMessage(info.error) || "task failed" };
+  if (status === "FAILURE") return { status: status, reason: failureReason(body) || "task failed" };
   return { status: status };
 }
 
-function videoURL(data) {
-  return data && Array.isArray(data.videos) && typeof data.videos[0] === "string" ? data.videos[0] : "";
+function resultVideoURL(data) {
+  return firstURL(data && data.videos);
 }
 
-function imageURLs(data) {
+function resultImageURLs(data) {
   if (!data || !Array.isArray(data.images)) return [];
   return data.images.filter((url) => typeof url === "string" && url !== "");
 }
@@ -281,92 +312,108 @@ const IMAGE_ARTIFACT_PREFIX = "image-";
 // plugin that claims openai_video without these two hooks.
 export function listArtifacts(task) {
   if (task.status !== "SUCCESS") return [];
-  const images = imageURLs(task.data);
+  const images = resultImageURLs(task.data);
   if (images.length) return images.map((_, index) => ({ key: IMAGE_ARTIFACT_PREFIX + (index + 1), type: "image" }));
-  return videoURL(task.data) ? [{ key: "video", type: "video" }] : [];
+  return resultVideoURL(task.data) ? [{ key: "video", type: "video" }] : [];
 }
 
 export function buildContentRequest(ctx) {
   const key = String(ctx.artifactKey || "");
   let url = "";
-  if (key === "video") url = videoURL(ctx.data);
+  if (key === "video") url = resultVideoURL(ctx.data);
   else if (key.startsWith(IMAGE_ARTIFACT_PREFIX)) {
     const position = key.slice(IMAGE_ARTIFACT_PREFIX.length);
-    if (/^[1-9][0-9]*$/.test(position)) url = imageURLs(ctx.data)[Number(position) - 1] || "";
+    if (/^[1-9][0-9]*$/.test(position)) url = resultImageURLs(ctx.data)[Number(position) - 1] || "";
   }
   if (!url) throw new Error("artifact_not_found");
   return { url: url, method: ctx.clientRequest.method, credentialless: true };
 }
 
-// TASK_REQUEST_STRINGS and taskRequestBody keep, of a POST /v1/videos body,
-// the fields of the host's task request (TaskSubmitReq in
-// relay/common/relay_info.go), which the Go adaptor's task route accepted:
-// only those fields survive, so on this API vendor parameters reach the
-// endpoint only through metadata. POST /v1/tasks/mulerouter instead hands the
-// plugin the client's whole body.
-const TASK_REQUEST_STRINGS = ["model", "mode", "image", "size", "seconds", "input_reference"];
+// OPENAI_VIDEO_FIELDS maps the OpenAI video fields to the MuleRouter
+// parameter they spell, and normalizes their value.
+const OPENAI_VIDEO_FIELDS = {
+  seconds: { param: "duration", value: integerAsNumber },
+  // The short side of WIDTHxHEIGHT names the resolution: 1280x720 is 720p.
+  size: {
+    param: "resolution",
+    value: (raw) => {
+      const match = typeof raw === "string" ? /^\s*(\d+)\s*[xX]\s*(\d+)\s*$/.exec(raw) : null;
+      if (!match) throw new Error("size must be WIDTHxHEIGHT, such as 1280x720, got " + (typeof raw === "string" ? quoted(raw) : String(raw)));
+      return String(Math.min(Number(match[1]), Number(match[2]))) + "p";
+    },
+  },
+  input_reference: { param: "image", value: (raw) => requireImageURL("input_reference", raw) },
+};
 
-// A duration that cannot be read as an integer is dropped, as the host drops
-// it from a task request.
-function taskDuration(raw) {
-  if (typeof raw === "number") return Number.isInteger(raw) ? raw : 0;
-  if (typeof raw === "string" && /^[+-]?\d+$/.test(raw)) return Number(raw);
-  return 0;
+// The vendor spellings normalized the same way, so two spellings of one value
+// agree.
+const VENDOR_VALUES = {
+  duration: integerAsNumber,
+  image: (raw) => requireImageURL("image", raw),
+};
+
+// A whole number written as a string is sent as a number, which MuleRouter
+// requires; anything else is left for the endpoint's field check to refuse.
+function integerAsNumber(raw) {
+  return typeof raw === "string" && /^\s*[+-]?\d+\s*$/.test(raw) ? Number(raw) : raw;
 }
 
-function taskMetadata(raw) {
-  let metadata = raw;
-  if (typeof raw === "string" && raw !== "") {
-    try {
-      metadata = JSON.parse(raw);
-    } catch (_error) {
-      return null;
-    }
-  }
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || !Object.keys(metadata).length) return null;
-  return metadata;
-}
-
-function taskRequestBody(value) {
-  const body = { prompt: value.prompt };
-  for (const key of TASK_REQUEST_STRINGS) {
-    const field = value[key];
-    if (field === undefined || field === null) continue;
-    if (typeof field !== "string") throw new Error(key + " must be a string");
-    if (field !== "") body[key] = field;
-  }
-  if (value.images !== undefined && value.images !== null) {
-    if (!Array.isArray(value.images) || value.images.some((image) => typeof image !== "string")) {
-      throw new Error("images must be an array of strings");
-    }
-    if (value.images.length) body.images = value.images.slice();
-  }
-  // The host's task request copies a lone image into images.
-  if (!body.images && typeof body.image === "string" && body.image.trim() !== "") body.images = [body.image];
-  const duration = taskDuration(value.duration);
-  if (duration !== 0) body.duration = duration;
-  const metadata = taskMetadata(value.metadata);
-  if (metadata) body.metadata = utils.json.clone(metadata);
-  return body;
+// The JSON API takes the input image as a URL only.
+function requireImageURL(name, raw) {
+  if (typeof raw !== "string" || !/^https?:\/\/\S+$/i.test(raw.trim())) throw new Error(name + " must be an image URL");
+  return raw.trim();
 }
 
 export const protocols = {
   openai_video: {
-    // POST /v1/videos takes the task request body and hands the endpoint the
-    // request the Go adaptor built from it, so it is sent and charged as the
-    // Go channel sent and charged it: vendor parameters go under metadata,
-    // and the OpenAI seconds and size fields are cost fields the endpoint
-    // refuses.
+    // POST /v1/videos takes a JSON object with the OpenAI video fields and
+    // MuleRouter's vendor parameters, at the top level or under metadata, and
+    // hands the endpoint the flat body it sends.
     decodeRequest(ctx) {
       const body = ctx.body;
       if (!body || body.kind !== "json") throw new Error("a JSON request body is required");
       const value = body.value;
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("the request body must be a JSON object");
-      requirePrompt(value);
-      const requestBody = taskRequestBody(value);
-      requestBody.model = ctx.model;
-      // The Go adaptor filed every MuleRouter task under image_to_video.
-      return { kind: "submit", model: ctx.model, action: "image_to_video", requestBody: requestBody };
+      const metadata = value.metadata;
+      if (metadata !== undefined && metadata !== null && (typeof metadata !== "object" || Array.isArray(metadata))) {
+        throw new Error("metadata must be a JSON object");
+      }
+      const endpoint = endpointFor(ctx);
+      const entries = [];
+      for (const key of Object.keys(value)) {
+        if (CONTROL_FIELDS.indexOf(key) < 0) entries.push({ label: key, key: key, raw: value[key] });
+      }
+      for (const key of Object.keys(metadata || {})) entries.push({ label: "metadata." + key, key: key, raw: metadata[key] });
+
+      const params = {};
+      const labels = {};
+      const unsupported = [];
+      for (const entry of entries) {
+        // A null field is the endpoint's default.
+        if (entry.raw === null || entry.raw === undefined) continue;
+        const alias = OPENAI_VIDEO_FIELDS[entry.key];
+        const param = alias ? alias.param : entry.key;
+        if (!Object.hasOwn(endpoint.fields, param) && endpoint.params.indexOf(param) < 0) {
+          if (unsupported.indexOf(entry.key) < 0) unsupported.push(entry.key);
+          continue;
+        }
+        const normalize = alias ? alias.value : VENDOR_VALUES[param];
+        const normalized = normalize ? normalize(entry.raw) : entry.raw;
+        if (Object.hasOwn(params, param)) {
+          if (JSON.stringify(params[param]) !== JSON.stringify(normalized)) {
+            throw new Error(labels[param] + " and " + entry.label + " give different values");
+          }
+          continue;
+        }
+        params[param] = normalized;
+        labels[param] = entry.label;
+      }
+      if (unsupported.length) {
+        throw new Error("parameter(s) " + unsupported.sort().join(", ") + " are not supported by this model; remove them");
+      }
+      requirePrompt(params);
+      params.model = ctx.model;
+      return { kind: "submit", model: ctx.model, action: endpoint.action, requestBody: params };
     },
     // The host fills in id, object, model, status, progress and the
     // timestamps; the plugin adds the result URL and the failure.
@@ -376,7 +423,7 @@ export const protocols = {
         if (Array.isArray(data[key]) && data[key].length) throw new Error("this model does not produce videos");
       }
       const video = {};
-      const url = videoURL(data);
+      const url = resultVideoURL(data);
       if (url) video.metadata = { url: url };
       if (task.status === "FAILURE") video.error = { message: task.fail_reason || "", code: "task_failed" };
       return video;

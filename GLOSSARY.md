@@ -13,7 +13,7 @@ An HTTP entry point on this gateway that a task plugin declares, through which c
 _Avoid_: Route (unqualified), endpoint
 
 **MuleRouter endpoint**:
-One upstream MuleRouter operation, addressed by vendor, model and action, together with the request fields that scale its price. Each MuleRouter endpoint is billed as exactly one model.
+One upstream MuleRouter operation, addressed by vendor, model and action, together with the request fields it prices or bounds: a field that scales its price, or one whose value it limits without pricing it. Each MuleRouter endpoint is billed as exactly one model.
 _Avoid_: Route, route row, MuleRouter route
 
 **MuleRouter model name**:
@@ -25,5 +25,5 @@ The short, vendor-neutral name a client sends for a MuleRouter endpoint, such as
 _Avoid_: Alias, short name, client model
 
 **Vendor parameter**:
-A request field specific to one MuleRouter endpoint (such as width or prompt_extend), outside the gateway's unified task vocabulary. Clients send vendor parameters under `metadata`.
-_Avoid_: Top-level field, vendor field, extra parameter
+A request field specific to one MuleRouter endpoint (such as width or prompt_extend), outside the gateway's unified task vocabulary. Clients send vendor parameters at the top level of the request or under `metadata`; both count.
+_Avoid_: Vendor field, extra parameter
