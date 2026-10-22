@@ -68,7 +68,7 @@ Content-Type: application/json
 
 视频模型另有 OpenAI Video API 风格的一组接口，见[视频的 OpenAI 兼容接口](#视频的-openai-兼容接口)。
 
-> 不要用 `/v1/video/generations` 提交这三个模型，这个接口到不了它们。
+> 不要用 `/v1/video/generations` 提交或查询这三个模型：提交到不了它们，查询请用下文的 `/v1/tasks/{任务ID}` 或 `/v1/videos/{任务ID}`。
 
 ### 第一步：提交任务
 
@@ -175,7 +175,7 @@ curl -o result.png "<content_url>"
 
 模型专属参数写在顶层或 `metadata` 里，在 `POST /v1/tasks/mulerouter` 和 `POST /v1/videos` 上都生效，并按实际取值生成和计费。同一个参数顶层和 `metadata` 都写时：`/v1/tasks/mulerouter` 以 `metadata` 为准；`/v1/videos` 要求两处的值一致，不一致返回 400。
 
-`metadata` 必须是 JSON 对象，不要写成字符串。
+`metadata` 必须是 JSON 对象，不要写成字符串。写成字符串时，`/v1/videos` 返回 400；`/v1/tasks/mulerouter` 会忽略整个 `metadata`，里面的参数都按默认值生成和计费。
 
 下面各表的「位置」一列是本文示例用的位置；写「`metadata`」的参数也可以写在顶层。
 
@@ -239,7 +239,7 @@ curl -X POST "$BASE_URL/v1/tasks/mulerouter" \
 | `model` | 顶层 | string | ✅ | — | | 固定填 `wan2.2-i2v-spicy` |
 | `image` | 顶层 | string | ✅ | — | | 首帧图片，链接或 base64 |
 | `prompt` | 顶层 | string | ✅ | — | 非空 | 描述镜头运动或画面变化 |
-| `duration` | 顶层 | integer | | `5` | **只能是 5 或 8** | 视频时长（秒） |
+| `duration` | 顶层 | integer | | `5` | **只能是 5 或 8** | 视频时长（秒），请写成数字 |
 | `last_image` | `metadata` | string / null | | `null` | | 尾帧图片。给了的话模型会在首尾帧之间插值 |
 | `resolution` | `metadata` | string | | `"480p"` | **只能是 `480p` 或 `720p`** | 输出分辨率 |
 | `prompt_extend` | `metadata` | boolean | | `true` | | 是否智能改写提示词 |
@@ -267,13 +267,12 @@ curl -X POST "$BASE_URL/v1/tasks/mulerouter" \
 curl "$BASE_URL/v1/tasks/{任务ID}" -H "Authorization: Bearer $API_KEY"
 ```
 
-`status` 有六种取值：
+`status` 有五种取值：
 
 | `status` | 含义 | 该做什么 |
 |---|---|---|
 | `NOT_START` | 刚提交，还没开始同步状态 | 继续等 |
-| `SUBMITTED` | 已提交到生成服务 | 继续等 |
-| `QUEUED` | 排队中 | 继续等 |
+| `SUBMITTED` | 已提交到生成服务，排队中 | 继续等 |
 | `IN_PROGRESS` | 正在生成 | 继续等 |
 | `SUCCESS` | 完成 | [获取产物](#获取产物) |
 | `FAILURE` | 失败 | 看 `fail_reason`，已扣费用自动退还 |
@@ -329,6 +328,19 @@ curl "$BASE_URL/v1/tasks/{任务ID}/artifacts" -H "Authorization: Bearer $API_KE
 提交      POST  $BASE_URL/v1/videos
 查询      GET   $BASE_URL/v1/videos/{任务ID}
 下载视频  GET   $BASE_URL/v1/videos/{任务ID}/content
+```
+
+提交返回 OpenAI 视频对象，`id` 就是任务 ID：
+
+```json
+{
+  "id": "task_ZyXwVuTsRqPoNmLkJiHgFeDcBa543210",
+  "object": "video",
+  "model": "wan2.2-i2v-spicy",
+  "status": "queued",
+  "progress": 0,
+  "created_at": 1792504230
+}
 ```
 
 提交的请求体是 JSON 对象，除了[模型参数](#wan22-i2v-spicy图生视频)里的写法，还接受 OpenAI Video API 的标准字段：
@@ -436,7 +448,7 @@ curl -L "$BASE_URL/v1/videos/{任务ID}/content" \
 关于退费：
 
 - **任务失败自动全额退款**，不需要申请。
-- **超过 24 小时未完成**判定为超时失败，同样全额退款。
+- **超时未完成**判定为失败，同样全额退款，详见[注意事项](#注意事项)。
 - 请求被拒绝（参数错误、余额不足等）**不会扣费**——校验发生在扣费之前。
 
 后台「日志」页面可以看到每次调用的扣费明细。
@@ -445,26 +457,40 @@ curl -L "$BASE_URL/v1/videos/{任务ID}/content" \
 
 ### 参数与任务类错误
 
-HTTP 状态码非 2xx，响应体形如：
+HTTP 400。参数校验的报错有两种响应体，`message` 里都会包含具体原因。
+
+提交时的参数校验（两个入口都有）：
 
 ```json
 { "code": "plugin_request_invalid", "message": "...invalid value 9 for duration, allowed: 5, 8...", "data": null }
 ```
 
-`message` 里会包含具体原因。常见原因：
+`code` 也可能是 `plugin_usage_invalid`，表示 `duration` 这类计费数值不合法。
+
+`/v1/videos` 请求格式的校验，形状和[鉴权与调度类错误](#鉴权与调度类错误)相同：
+
+```json
+{ "error": { "code": "", "message": "parameter(s) mode are not supported by this model; remove them (request id: ...)", "type": "new_api_error" } }
+```
+
+常见原因：
 
 | `message` 中包含 | 含义 |
 |---|---|
 | `prompt is required` | 缺 `prompt`，或 `prompt` 是空字符串 |
 | `invalid value 9 for duration, allowed: 5, 8` | `duration` 只能是 5 或 8 |
 | `invalid value "1080p" for resolution, allowed: 480p, 720p` | 分辨率只能是 480p 或 720p |
-| `width must be <= 1536` | 尺寸超出 256 – 1536 |
+| `width must be <= 1536`、`width must be >= 256` | 尺寸超出 256 – 1536 |
+| `must be an integer` | `width`、`height` 这类整数参数写成了小数 |
+| `is not a number` | `width`、`height` 这类数值参数写成了非数字 |
+| `plugin usage value must be a number` | `duration` 写成了非数字或 `null` |
+| `plugin usage value must be a finite non-negative number`、`plugin usage value exceeds the host limit` | `duration` 是负数或大得离谱 |
 | `affect the price of this model and are not enabled on this endpoint` | 你传了一个会影响价格但这个模型不支持的参数（如给图片模型传 `duration`），去掉它 |
-| `plugin usage value must be a number` | `duration` 等数值参数写成了非数字 |
 | `are not supported by this model` | `/v1/videos` 上传了这个模型不接受的字段（如 `mode`），去掉它 |
 | `give different values` | `/v1/videos` 上同一个参数用两种写法给了不同的值（如 `seconds: "8"` 和 `duration: 5`），只留一种 |
 | `size must be WIDTHxHEIGHT` | `size` 要写成 `1280x720` 这样的 `宽x高` |
-| `input_reference must be an image URL` | `/v1/videos` 的 `input_reference` 或 `image` 不是 `http`/`https` 链接 |
+| `image must be an image URL`、`input_reference must be an image URL` | `/v1/videos` 的 `image` 或 `input_reference` 不是 `http`/`https` 链接 |
+| `metadata must be a JSON object` | `/v1/videos` 的 `metadata` 写成了字符串或数组 |
 
 查询和取产物时任务 ID 不对，返回 404。
 
@@ -479,9 +505,9 @@ HTTP 状态码非 2xx，响应体形如：
 | HTTP | 原因 | 怎么办 |
 |---|---|---|
 | 401 | 密钥无效、已删除或已过期 | 检查 `Authorization` 头，重新生成令牌 |
-| 403 | 令牌无权访问该模型 | 检查令牌的「可用模型」设置 |
-| 429 | 触发限流 | 退避后重试 |
-| 503 | 该模型当前无可用服务 | 确认 `model` 拼写正确、提交地址是 `/v1/tasks/mulerouter`，或联系管理员 |
+| 403 | 余额不足（`code` 是 `insufficient_user_quota`），或令牌无权访问该模型 | 充值，或检查令牌的「可用模型」设置 |
+| 429 | `/v1/videos` 触发本站的模型请求限流；`/v1/tasks/mulerouter` 是生成服务繁忙 | 退避后重试 |
+| 503 | 该模型当前无可用服务 | 确认 `model` 拼写正确、提交地址是 `/v1/tasks/mulerouter`（图片模型不能用 `/v1/videos`），或联系管理员 |
 
 余额不足会在提交时明确报错，不会先生成再欠费。
 
@@ -586,11 +612,11 @@ curl "$BASE_URL/v1/tasks/task_AbCdEfGhIjKlMnOpQrStUvWxYz012345/artifacts" \
 
 ## 注意事项
 
-**产物链接有有效期**，本站不做长期保存。**拿到结果后请尽快下载到你自己的存储**，不要把 `content_url` 直接存进数据库当长期地址用。
+**产物不长期保存**。`content_url` 本身不过期，但产物文件由生成服务保存，过一段时间可能就下载不到了。**拿到结果后请尽快下载到你自己的存储**，不要把 `content_url` 直接存进数据库当长期地址用。
 
-**超时**：任务超过 24 小时未完成会被自动判定为失败并退款。正常情况下图片一分钟内、视频几分钟内完成，如果长时间停在排队状态，通常是生成服务繁忙。
+**超时**：任务默认超过 24 小时未完成会被判定为失败（`fail_reason` 是 `Task timed out`）并退款，具体时长以本站设置为准。本站连续多次（约 5 分钟）查不到任务状态时，任务也会判为失败并退款。正常情况下图片一分钟内、视频几分钟内完成，如果长时间停在排队状态，通常是生成服务繁忙。
 
-**并发**：没有单独的并发限制，但受令牌整体限流约束。批量任务建议控制并发，并对 429 做退避重试。
+**并发**：`/v1/tasks/mulerouter` 没有单独的并发限制；`/v1/videos` 受本站的模型请求限流约束。批量任务建议控制并发，并对 429 做退避重试。
 
 **内容审核**：提示词和产物都会经过审核，被拒绝的任务返回 `FAILURE` 并附带原因，费用自动退还。
 
