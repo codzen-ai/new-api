@@ -3,20 +3,24 @@
 // prices stay keyed by the public model name, and a request is charged that
 // price times the multipliers its fields select here.
 //
-// Each endpoint declares what it produces (image or video) and, under fields,
-// every request field, by its MuleRouter name, that affects the price or needs
-// a bound:
+// Each endpoint declares what it produces (image or video), the action its
+// tasks are filed under on every entry, and, under fields, every request
+// field, by its MuleRouter name, that affects the price or needs a bound:
 // - values maps each allowed value to its multiplier, which the host receives
 //   under the name ratio; default is the value an omitted or null field is
 //   billed as.
 // - min and max bound a field that does not affect the price.
 // - integer requires a whole number, written as a JSON number or a numeric
 //   string.
+// An endpoint that produces videos also lists under params the other request
+// fields MuleRouter takes; the OpenAI video API refuses any field outside
+// fields and params.
 // Request validation and the billing multipliers are both derived from this
 // table, and the OpenAI video API serves the endpoints that produce videos.
 const ENDPOINTS = {
   "carrothub/z-image-spicy/generation": {
     produces: "image",
+    action: "text_to_image",
     fields: {
       // MuleRouter adds a flat fee for prompt rewriting: $0.001 on a $0.013 image.
       prompt_extend: { ratio: "prompt_extend", values: { true: 1.076923, false: 1 }, default: true },
@@ -25,14 +29,16 @@ const ENDPOINTS = {
     },
   },
   // Image edit: one flat price per call.
-  "carrothub/qwen-image-edit-spicy/generation": { produces: "image", fields: {} },
+  "carrothub/qwen-image-edit-spicy/generation": { produces: "image", action: "image_to_image", fields: {} },
   // Image to video, priced per second of output and by resolution.
   "carrothub/wan2.2-i2v-spicy/generation": {
     produces: "video",
+    action: "image_to_video",
     fields: {
       duration: { ratio: "seconds", integer: true, values: { 5: 5, 8: 8 }, default: 5 },
       resolution: { ratio: "resolution", values: { "480p": 1, "720p": 2 }, default: "480p" },
     },
+    params: ["prompt", "image", "last_image", "prompt_extend", "seed"],
   },
 };
 
@@ -70,7 +76,7 @@ export const meta = {
     en: "Asynchronous image and video generation through MuleRouter",
     zh: "通过 MuleRouter 异步生成图片和视频",
   },
-  version: "1.1.0",
+  version: "1.2.0",
   author: { name: "codzen" },
   baseUrl: "https://api.mulerouter.ai",
   upstreams: ["vendor"],
@@ -93,7 +99,8 @@ function upstreamPath(modelName) {
 function endpointFor(ctx) {
   const name = ctx.upstreamModel || ctx.model;
   if (!Object.prototype.hasOwnProperty.call(ENDPOINTS, name)) throw new Error("this model is not available on this channel");
-  return { name: name, fields: ENDPOINTS[name].fields };
+  const endpoint = ENDPOINTS[name];
+  return { name: name, action: endpoint.action, fields: endpoint.fields, params: endpoint.params || [] };
 }
 
 // The upstream body is the request minus the gateway's own fields, with vendor
@@ -102,18 +109,6 @@ function upstreamParams(requestBody) {
   const params = {};
   const body = requestBody || {};
   for (const key of Object.keys(body)) params[key] = body[key];
-  // On POST /v1/videos taskRequestBody copies a lone image into images
-  // ([image]), as the host's task request did for the Go channel, and the Go
-  // adaptor sent only the image the client wrote; dropping the copy here sends
-  // the same body. POST /v1/tasks/mulerouter hands over the client's body
-  // unchanged, so there the rule only matters to a client that itself sends
-  // image and images with the same single URL: the Go adaptor sent both, the
-  // plugin sends only image. Both name the same single input image and
-  // neither field is priced, so the charge is the same.
-  const images = params.images;
-  if (typeof params.image === "string" && Array.isArray(images) && images.length === 1 && images[0] === params.image) {
-    delete params.images;
-  }
   const metadata = body.metadata;
   if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
     for (const key of Object.keys(metadata)) params[key] = metadata[key];
@@ -211,6 +206,7 @@ export function buildSubmitRequest(ctx) {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + ctx.apiKey },
     body: params,
+    action: endpoint.action,
   };
 }
 
@@ -329,75 +325,91 @@ export function buildContentRequest(ctx) {
   return { url: url, method: ctx.clientRequest.method, credentialless: true };
 }
 
-// TASK_REQUEST_STRINGS and taskRequestBody keep, of a POST /v1/videos body,
-// the fields of the host's task request (TaskSubmitReq in
-// relay/common/relay_info.go), which the Go adaptor's task route accepted:
-// only those fields survive, so on this API vendor parameters reach the
-// endpoint only through metadata. POST /v1/tasks/mulerouter instead hands the
-// plugin the client's whole body.
-const TASK_REQUEST_STRINGS = ["model", "mode", "image", "size", "seconds", "input_reference"];
+// OPENAI_VIDEO_FIELDS maps the OpenAI video fields to the MuleRouter
+// parameter they spell, and normalizes their value.
+const OPENAI_VIDEO_FIELDS = {
+  seconds: { param: "duration", value: (raw) => integerText(raw) },
+  // The short side of WIDTHxHEIGHT names the resolution: 1280x720 is 720p.
+  size: {
+    param: "resolution",
+    value: (raw) => {
+      const match = typeof raw === "string" ? /^\s*(\d+)\s*[xX]\s*(\d+)\s*$/.exec(raw) : null;
+      if (!match) throw new Error("size must be WIDTHxHEIGHT, such as 1280x720, got " + (typeof raw === "string" ? quoted(raw) : String(raw)));
+      return String(Math.min(Number(match[1]), Number(match[2]))) + "p";
+    },
+  },
+  input_reference: { param: "image", value: (raw) => imageURL("input_reference", raw) },
+};
 
-// A duration that cannot be read as an integer is dropped, as the host drops
-// it from a task request.
-function taskDuration(raw) {
-  if (typeof raw === "number") return Number.isInteger(raw) ? raw : 0;
-  if (typeof raw === "string" && /^[+-]?\d+$/.test(raw)) return Number(raw);
-  return 0;
+// The vendor spellings normalized the same way, so two spellings of one value
+// agree.
+const VENDOR_VALUES = {
+  duration: (raw) => integerText(raw),
+  image: (raw) => imageURL("image", raw),
+};
+
+// A whole number written as a string is sent as a number, which MuleRouter
+// requires; anything else is left for the endpoint's field check to refuse.
+function integerText(raw) {
+  return typeof raw === "string" && /^\s*[+-]?\d+\s*$/.test(raw) ? Number(raw) : raw;
 }
 
-function taskMetadata(raw) {
-  let metadata = raw;
-  if (typeof raw === "string" && raw !== "") {
-    try {
-      metadata = JSON.parse(raw);
-    } catch (_error) {
-      return null;
-    }
-  }
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || !Object.keys(metadata).length) return null;
-  return metadata;
-}
-
-function taskRequestBody(value) {
-  const body = { prompt: value.prompt };
-  for (const key of TASK_REQUEST_STRINGS) {
-    const field = value[key];
-    if (field === undefined || field === null) continue;
-    if (typeof field !== "string") throw new Error(key + " must be a string");
-    if (field !== "") body[key] = field;
-  }
-  if (value.images !== undefined && value.images !== null) {
-    if (!Array.isArray(value.images) || value.images.some((image) => typeof image !== "string")) {
-      throw new Error("images must be an array of strings");
-    }
-    if (value.images.length) body.images = value.images.slice();
-  }
-  // The host's task request copies a lone image into images.
-  if (!body.images && typeof body.image === "string" && body.image.trim() !== "") body.images = [body.image];
-  const duration = taskDuration(value.duration);
-  if (duration !== 0) body.duration = duration;
-  const metadata = taskMetadata(value.metadata);
-  if (metadata) body.metadata = utils.json.clone(metadata);
-  return body;
+// The JSON API takes the input image as a URL only.
+function imageURL(name, raw) {
+  if (typeof raw !== "string" || !/^https?:\/\/\S+$/i.test(raw.trim())) throw new Error(name + " must be an image URL");
+  return raw.trim();
 }
 
 export const protocols = {
   openai_video: {
-    // POST /v1/videos takes the task request body and hands the endpoint the
-    // request the Go adaptor built from it, so it is sent and charged as the
-    // Go channel sent and charged it: vendor parameters go under metadata,
-    // and the OpenAI seconds and size fields are cost fields the endpoint
-    // refuses.
+    // POST /v1/videos takes a JSON object with the OpenAI video fields and
+    // MuleRouter's vendor parameters, at the top level or under metadata, and
+    // hands the endpoint the flat body it sends.
     decodeRequest(ctx) {
       const body = ctx.body;
       if (!body || body.kind !== "json") throw new Error("a JSON request body is required");
       const value = body.value;
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("the request body must be a JSON object");
-      requirePrompt(value);
-      const requestBody = taskRequestBody(value);
-      requestBody.model = ctx.model;
-      // The Go adaptor filed every MuleRouter task under image_to_video.
-      return { kind: "submit", model: ctx.model, action: "image_to_video", requestBody: requestBody };
+      const metadata = value.metadata;
+      if (metadata !== undefined && metadata !== null && (typeof metadata !== "object" || Array.isArray(metadata))) {
+        throw new Error("metadata must be a JSON object");
+      }
+      const endpoint = endpointFor(ctx);
+      const entries = [];
+      for (const key of Object.keys(value)) {
+        if (CONTROL_FIELDS.indexOf(key) < 0) entries.push({ label: key, key: key, raw: value[key] });
+      }
+      for (const key of Object.keys(metadata || {})) entries.push({ label: "metadata." + key, key: key, raw: metadata[key] });
+
+      const params = {};
+      const labels = {};
+      const unsupported = [];
+      for (const entry of entries) {
+        // A null field is the endpoint's default.
+        if (entry.raw === null || entry.raw === undefined) continue;
+        const alias = OPENAI_VIDEO_FIELDS[entry.key];
+        const param = alias ? alias.param : entry.key;
+        if (!Object.prototype.hasOwnProperty.call(endpoint.fields, param) && endpoint.params.indexOf(param) < 0) {
+          if (unsupported.indexOf(entry.key) < 0) unsupported.push(entry.key);
+          continue;
+        }
+        const normalize = alias ? alias.value : VENDOR_VALUES[param];
+        const normalized = normalize ? normalize(entry.raw) : entry.raw;
+        if (Object.prototype.hasOwnProperty.call(params, param)) {
+          if (JSON.stringify(params[param]) !== JSON.stringify(normalized)) {
+            throw new Error(labels[param] + " and " + entry.label + " give different values");
+          }
+          continue;
+        }
+        params[param] = normalized;
+        labels[param] = entry.label;
+      }
+      if (unsupported.length) {
+        throw new Error("parameter(s) " + unsupported.sort().join(", ") + " are not supported by this model; remove them");
+      }
+      requirePrompt(params);
+      params.model = ctx.model;
+      return { kind: "submit", model: ctx.model, action: endpoint.action, requestBody: params };
     },
     // The host fills in id, object, model, status, progress and the
     // timestamps; the plugin adds the result URL and the failure.
