@@ -38,8 +38,8 @@ UPSTREAM_BASE_PRICE = {
 
 # 每个用例声明它期望的倍率，这是断言的核心：倍率不对就是计费不对。
 # Vendor parameter（width/height/prompt_extend/resolution）一律放在 metadata 下，prompt/image/
-# duration 留在顶层：/v1/tasks/mulerouter 两种写法都认（metadata 优先），但 /v1/videos 只认
-# metadata 里的 Vendor parameter。照用户指南推荐的写法发，测的就是用户实际会发的请求。
+# duration 留在顶层，和用户指南的示例一致。/v1/tasks/mulerouter 顶层和 metadata 两种写法都认
+# （同一参数两处都写时以 metadata 为准）。
 CASES = {
     "z-image": {
         "model": "z-image-spicy",
