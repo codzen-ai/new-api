@@ -28,14 +28,16 @@ MuleRouter 是一家聚合平台，把多家厂商的生成模型收在 `/vendor
 
 | 名字 | 样子 | 出现在哪 |
 |---|---|---|
-| **MuleRouter model name** | `carrothub/z-image-spicy/generation` | 插件 `ENDPOINTS` 表的键，`{厂商}/{模型}/{动作}` 三段，插件用它拼上游 URL |
-| **Public model name** | `z-image-spicy` | 客户端传的名字，也是**计价用的名字** |
+| **MuleRouter model name** | `carrothub/z-image-spicy/generation` | 只在插件内部：`ENDPOINTS` 表每一项的 `mulerouterModel`，`{厂商}/{模型}/{动作}` 三段，插件用它拼上游 URL。客户端既不传也看不到 |
+| **Public model name** | `z-image-spicy` | 插件 `ENDPOINTS` 表的键，客户端传的名字，也是**计价用的名字** |
 
 MuleRouter model name 必须带动作段，因为有些厂商同一个模型的不同动作价格不同（例如 `kling-v3` 的 `text-to-video` 和 `image-to-video`），要分别成为不同的 endpoint。
 
-Public model name 通过**渠道的「模型重定向」**（`model_mapping`）映射到 MuleRouter model name。这一步不只是为了好写，更是为了**不让终端用户看到上游是谁**——不配重定向的话客户就得在请求里写 `carrothub/...`。
+**Public model name 由插件声明，插件内部把它对应到 MuleRouter model name，渠道不配「模型重定向」**（`model_mapping`）。原因：宿主会把重定向后的名字当作上游模型名，存进任务的 `properties.upstream_model_name`，还写进使用日志的 `other.upstream_model_name`，普通用户在控制台的任务列表和使用日志里都看得到（显示为“实际模型”）。重定向到 MuleRouter model name，等于把 `carrothub/...` 亮给了客户。不配重定向，宿主看到的上游模型名就是 Public model name。决策记录见 [ADR-0002](../../docs/adr/0002-mulerouter-plugin-declares-public-model-names.md)。
 
-Public model name 可以取任意名字。本文示例取和上游同名的短名（`z-image-spicy`），如果连模型名本身都不想暴露，取 `image-gen-pro` 之类也完全可以，只要渠道模型、模型重定向、价格三处保持一致。
+插件只认 Public model name。渠道如果还把 Public model name 重定向到 MuleRouter model name，请求会被拒绝，报 `this model is not available on this channel`。
+
+Public model name 写在插件里，改名要改插件代码并发版。确实需要给客户另一个名字时，可以在渠道上配一条**别名**重定向，目标必须是插件里的 Public model name（例如 `{"image-gen-pro": "z-image-spicy"}`），渠道模型和价格用别名；这样客户和日志里只会出现别名和 Public model name。
 
 ## 配置步骤
 
@@ -59,19 +61,9 @@ Public model name 可以取任意名字。本文示例取和上游同名的短�
 z-image-spicy,qwen-image-edit-spicy,wan2.2-i2v-spicy
 ```
 
-> ⚠️ 这里**只填 Public model name，不要填三段式的 MuleRouter model name**。填了的话，`/v1/models` 会把 `carrothub/...` 列给客户看。
+> ⚠️ 这里**只填 Public model name，不要填三段式的 MuleRouter model name**。填了的话，`/v1/models` 会把 `carrothub/...` 列给客户看，插件也不认。
 
-**模型重定向**填 Public model name → MuleRouter model name：
-
-```json
-{
-  "z-image-spicy": "carrothub/z-image-spicy/generation",
-  "qwen-image-edit-spicy": "carrothub/qwen-image-edit-spicy/generation",
-  "wan2.2-i2v-spicy": "carrothub/wan2.2-i2v-spicy/generation"
-}
-```
-
-重定向的值必须是插件 `ENDPOINTS` 表里已有的键，一字不差。计费参数（边界和倍率）已经写在插件里，渠道上没有别的要填。
+**模型重定向留空。** 不要把 Public model name 重定向到 MuleRouter model name，原因见[两个名字，别搞混](#两个名字别搞混)。计费参数（边界和倍率）已经写在插件里，渠道上没有别的要填。
 
 ### 2. 配价格
 
@@ -150,8 +142,8 @@ curl "$BASE_URL/v1/models" -H "Authorization: Bearer $API_KEY"
 MuleRouter endpoint 写在插件代码里，新增要改代码、发版：
 
 1. **查上游价格和参数**。到 MuleRouter 文档的对应端点页，记下价格、参数的取值范围、以及哪些参数影响价格。
-2. **改插件**。在 `plugins/tasks/mulerouter/plugin.js` 的 `ENDPOINTS` 表加一个 endpoint，键是 MuleRouter model name；写明它的产物（`produces`：`image` 或 `video`）和任务 action（如 `text_to_image`），把影响价格的参数写进它的 `fields`，命中成本字段黑名单的参数即使不计费也要声明边界；视频 endpoint 还要在 `params` 里列出上游接受的其他字段，`/v1/videos` 只放行这些。在 `plugins/mulerouter_test.go` 补上对应的测试，然后重新部署。
-3. **加 Public model name**。渠道的「模型」字段加 Public model name，「模型重定向」加一条映射到新的 MuleRouter model name。
+2. **改插件**。在 `plugins/tasks/mulerouter/plugin.js` 的 `ENDPOINTS` 表加一个 endpoint，键是 Public model name，`mulerouterModel` 写它对应的 MuleRouter model name；写明它的产物（`produces`：`image` 或 `video`）和任务 action（如 `text_to_image`），把影响价格的参数写进它的 `fields`，命中成本字段黑名单的参数即使不计费也要声明边界；视频 endpoint 还要在 `params` 里列出上游接受的其他字段，`/v1/videos` 只放行这些。在 `plugins/mulerouter_test.go` 补上对应的测试，然后重新部署。
+3. **加 Public model name**。渠道的「模型」字段加 Public model name，不配「模型重定向」。
 4. **配价格**。模型固定价格加一条，键是 Public model name。按时长计费的模型基础价填**每秒**价。
 
 最后跑一次冒烟测试。
@@ -162,7 +154,7 @@ MuleRouter endpoint 写在插件代码里，新增要改代码、发版：
 渠道的「模型」字段里没有客户传的那个名字。检查 Public model name 是否拼对、渠道是否启用、分组是否匹配。也确认客户用的是 `/v1/tasks/mulerouter` 或 `/v1/videos`，`/v1/video/generations` 到不了这个渠道。
 
 **提交返回 `this model is not available on this channel`**
-名字在渠道模型列表里，但重定向后的名字不是插件 `ENDPOINTS` 表里的键。检查「模型重定向」的值是否和 `ENDPOINTS` 的键一字不差；这个模型确实还没接入的话，按[新增一个模型](#新增一个模型)改插件。
+名字在渠道模型列表里，但插件不认它（重定向后的名字不是插件 `ENDPOINTS` 表里的 Public model name）。最常见的原因是渠道还配着到 `carrothub/...` 的「模型重定向」，删掉即可；配了别名重定向的，检查目标是否和 `ENDPOINTS` 的键一字不差；这个模型确实还没接入的话，按[新增一个模型](#新增一个模型)改插件。插件 1.3.0 之前通过重定向提交、还没跑完的任务也会因此轮询失败并自动退款。
 
 **提交返回 400，提示某参数「affect the price of this model and are not enabled」**
 客户传了黑名单里的字段而该 endpoint 没声明它。要么在 `plugin.js` 里给这个 endpoint 的 `fields` 加上（带边界）并发版，要么让客户别传。

@@ -1,7 +1,9 @@
-// MuleRouter endpoints, keyed by MuleRouter model name ({vendor}/{model}/{action}).
-// A channel model_mapping turns the public model name into one of these keys;
-// prices stay keyed by the public model name, and a request is charged that
-// price times the multipliers its fields select here.
+// MuleRouter endpoints, keyed by public model name. Callers never see the
+// MuleRouter model name ({vendor}/{model}/{action}) each one names under
+// mulerouterModel, from which its upstream path is built, so MuleRouter
+// channels carry no model_mapping (ADR-0002). Prices are keyed by the public
+// model name, and a request is charged that price times the multipliers its
+// fields select here.
 //
 // Each endpoint declares what it produces (image or video), the action its
 // tasks are filed under on every entry, and, under fields, every request
@@ -18,7 +20,8 @@
 // Request validation and the billing multipliers are both derived from this
 // table, and the OpenAI video API serves the endpoints that produce videos.
 const ENDPOINTS = {
-  "carrothub/z-image-spicy/generation": {
+  "z-image-spicy": {
+    mulerouterModel: "carrothub/z-image-spicy/generation",
     produces: "image",
     action: "text_to_image",
     fields: {
@@ -29,9 +32,15 @@ const ENDPOINTS = {
     },
   },
   // Image edit: one flat price per call.
-  "carrothub/qwen-image-edit-spicy/generation": { produces: "image", action: "image_to_image", fields: {} },
+  "qwen-image-edit-spicy": {
+    mulerouterModel: "carrothub/qwen-image-edit-spicy/generation",
+    produces: "image",
+    action: "image_to_image",
+    fields: {},
+  },
   // Image to video, priced per second of output and by resolution.
-  "carrothub/wan2.2-i2v-spicy/generation": {
+  "wan2.2-i2v-spicy": {
+    mulerouterModel: "carrothub/wan2.2-i2v-spicy/generation",
     produces: "video",
     action: "image_to_video",
     fields: {
@@ -76,7 +85,7 @@ export const meta = {
     en: "Asynchronous image and video generation through MuleRouter",
     zh: "通过 MuleRouter 异步生成图片和视频",
   },
-  version: "1.2.0",
+  version: "1.3.0",
   author: { name: "codzen" },
   baseUrl: "https://api.mulerouter.ai",
   upstreams: ["vendor"],
@@ -86,21 +95,22 @@ export const meta = {
   protocols: [{ name: "openai_video", models: Object.keys(ENDPOINTS).filter((name) => ENDPOINTS[name].produces === "video") }],
 };
 
-function upstreamPath(modelName) {
-  const parts = String(modelName || "")
-    .trim()
-    .split("/");
-  if (parts.length !== 3 || parts.some((part) => part === "")) return "";
-  return "/vendors/" + parts[0] + "/v1/" + parts[1] + "/" + parts[2];
-}
-
-// Error messages reach the caller, who must not learn the vendor or the
-// MuleRouter model name behind the public model name.
+// endpointFor finds the endpoint of the upstream model, which is the public
+// model name, or the public model name an alias maps to. A MuleRouter model
+// name is not a key: a channel mapping to one, or a task submitted under one,
+// is refused. Error messages reach the caller, who must not learn the vendor
+// or the MuleRouter model name behind the public model name.
 function endpointFor(ctx) {
   const name = ctx.upstreamModel || ctx.model;
   if (!Object.hasOwn(ENDPOINTS, name)) throw new Error("this model is not available on this channel");
   const endpoint = ENDPOINTS[name];
-  return { name: name, action: endpoint.action, fields: endpoint.fields, params: endpoint.params || [] };
+  const [vendor, model, action] = endpoint.mulerouterModel.split("/");
+  return {
+    path: "/vendors/" + vendor + "/v1/" + model + "/" + action,
+    action: endpoint.action,
+    fields: endpoint.fields,
+    params: endpoint.params || [],
+  };
 }
 
 // The upstream body is the request minus the gateway's own fields, with vendor
@@ -196,7 +206,7 @@ export function buildSubmitRequest(ctx) {
   requirePrompt(params);
   billingRatios(endpoint, params);
   return {
-    url: ctx.baseUrl + upstreamPath(endpoint.name),
+    url: ctx.baseUrl + endpoint.path,
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + ctx.apiKey },
     body: params,
@@ -236,13 +246,11 @@ export function parseSubmitResponse(_ctx, resp) {
   return { taskId: info.id, taskData: resp.body };
 }
 
-// MuleRouter files a task under its model's path, so the stored model name
-// rebuilds the query URL.
+// MuleRouter files a task under its endpoint's path, so the endpoint of the
+// stored upstream model rebuilds the query URL.
 export function buildQueryRequest(ctx) {
-  const path = upstreamPath(ctx.upstreamModel || ctx.model);
-  if (!path) throw new Error("cannot rebuild the task query URL");
   return {
-    url: ctx.baseUrl + path + "/" + ctx.taskId,
+    url: ctx.baseUrl + endpointFor(ctx).path + "/" + ctx.taskId,
     method: "GET",
     headers: { Accept: "application/json", Authorization: "Bearer " + ctx.apiKey },
   };
