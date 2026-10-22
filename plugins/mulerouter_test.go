@@ -952,9 +952,10 @@ func TestMulerouterPluginReadsTasks(t *testing.T) {
 // plugin, and tasks the plugin submitted itself, have the same row shape: the
 // persisted data is the latest upstream poll body. The plugin renders each
 // state as the Go adaptor's ConvertToOpenAIVideo did, which generated the
-// expected objects. The one difference is host-owned: the host sends
-// completed_at only for a completed task, where the Go adaptor also stamped an
-// unfinished task with its last update time.
+// expected objects, with two differences. A completed task no longer carries
+// metadata.url, the MuleRouter result URL; the video comes from the content
+// route. And the host sends completed_at only for a completed task, where the
+// Go adaptor also stamped an unfinished task with its last update time.
 func TestMulerouterPluginRendersOpenAIVideo(t *testing.T) {
 	pluginConverter, ok := relay.GetTaskAdaptor(constant.TaskPlatform(mulerouterPluginKey)).(relaychannel.OpenAIVideoConverter)
 	require.True(t, ok)
@@ -1001,11 +1002,14 @@ func TestMulerouterPluginRendersOpenAIVideo(t *testing.T) {
 			want:     `{"id":"task_public","object":"video","model":"wan2.2-i2v-spicy","status":"in_progress","progress":30,"created_at":1786370025}`,
 		},
 		{
-			name:     "completed carries the result URL",
+			// The video is downloaded from GET /v1/videos/{task_id}/content,
+			// which the gateway proxies; the MuleRouter result URL would
+			// reveal the vendor, carrothub and the upstream task id.
+			name:     "completed hides the result URL",
 			status:   model.TaskStatusSuccess,
 			progress: "100%",
-			data:     `{"task_info":{"id":"up-1","status":"completed"},"videos":["https://cdn/out.mp4","https://cdn/alt.mp4"]}`,
-			want:     `{"id":"task_public","object":"video","model":"wan2.2-i2v-spicy","status":"completed","progress":100,"created_at":1786370025,"completed_at":1786370124,"metadata":{"url":"https://cdn/out.mp4"}}`,
+			data:     `{"task_info":{"id":"up-1","status":"completed"},"videos":["https://mule-router-assets.muleusercontent.com/u/carrothub/tasks/up-1/outputs/result_00.mp4"]}`,
+			want:     `{"id":"task_public","object":"video","model":"wan2.2-i2v-spicy","status":"completed","progress":100,"created_at":1786370025,"completed_at":1786370124}`,
 		},
 		{
 			name:       "failed carries the failure reason",
