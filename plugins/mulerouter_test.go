@@ -308,6 +308,12 @@ func TestMulerouterPluginSubmissions(t *testing.T) {
 			reject: `invalid value "maybe" for prompt_extend, allowed: false, true`,
 		},
 		{
+			name:   "z-image prompt_extend as a number",
+			model:  "z-image-spicy",
+			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"prompt_extend":1}}`,
+			reject: `invalid value "1" for prompt_extend, allowed: false, true`,
+		},
+		{
 			name:   "undeclared cost field hidden in metadata",
 			model:  "z-image-spicy",
 			body:   `{"model":"z-image-spicy","prompt":"a cat","metadata":{"n":2}}`,
@@ -497,6 +503,12 @@ func TestMulerouterPluginSubmissions(t *testing.T) {
 			model:  "wan2.2-i2v-spicy",
 			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":5,"metadata":{"resolution":"1080p"}}`,
 			reject: `invalid value "1080p" for resolution, allowed: 480p, 720p`,
+		},
+		{
+			name:   "wan2.2 resolution as a number",
+			model:  "wan2.2-i2v-spicy",
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":{"resolution":720}}`,
+			reject: `invalid value "720" for resolution, allowed: 480p, 720p`,
 		},
 		{
 			name:   "wan2.2 refuses seconds, which it reads from duration",
