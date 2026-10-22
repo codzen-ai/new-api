@@ -541,7 +541,7 @@ func TestMulerouterPluginSubmissions(t *testing.T) {
 // sends the client's body as written, with metadata winning: for the cases
 // where that differs it sends and bills tasksUpload and tasksRatios, or
 // refuses with tasksReject.
-func TestMulerouterPluginVideosAPIBillsLikeTheTasksEntry(t *testing.T) {
+func TestMulerouterPluginVideosAPISubmissions(t *testing.T) {
 	plugin := newMulerouterPlugin(t)
 	const wanVideo = mulerouterBaseURL + "/vendors/carrothub/v1/wan2.2-i2v-spicy/generation"
 	cases := []struct {
@@ -624,9 +624,10 @@ func TestMulerouterPluginVideosAPIBillsLikeTheTasksEntry(t *testing.T) {
 			tasksReject: "parameter(s) size affect the price of this model and are not enabled on this endpoint; remove them",
 		},
 		{
+			// The OpenAI-style example in guides/user/image-video-generation.md.
 			name:        "a portrait size and seconds bill 8 seconds at 480p",
-			body:        `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","seconds":"8","size":"480x832"}`,
-			upload:      map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": float64(8), "resolution": "480p"},
+			body:        `{"model":"wan2.2-i2v-spicy","prompt":"镜头缓缓推进，人物微笑","image":"https://example.com/first-frame.png","seconds":"8","size":"480x832"}`,
+			upload:      map[string]any{"prompt": "镜头缓缓推进，人物微笑", "image": "https://example.com/first-frame.png", "duration": float64(8), "resolution": "480p"},
 			ratios:      map[string]float64{"seconds": 8, "resolution": 1},
 			tasksReject: "parameter(s) seconds, size affect the price of this model and are not enabled on this endpoint; remove them",
 		},
@@ -658,9 +659,11 @@ func TestMulerouterPluginVideosAPIBillsLikeTheTasksEntry(t *testing.T) {
 			tasksRatios: map[string]float64{"seconds": 5, "resolution": 1},
 		},
 		{
+			// The top-level vendor parameter example in
+			// guides/user/image-video-generation.md.
 			name:   "top-level vendor parameters reach upstream and bill as written",
-			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","resolution":"720p","seed":7,"prompt_extend":false,"last_image":"https://cdn/last.png"}`,
-			upload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "resolution": "720p", "seed": float64(7), "prompt_extend": false, "last_image": "https://cdn/last.png"},
+			body:   `{"model":"wan2.2-i2v-spicy","prompt":"镜头缓缓推进，人物微笑","image":"https://example.com/first-frame.png","resolution":"720p","seed":7,"prompt_extend":false,"last_image":"https://example.com/last-frame.png"}`,
+			upload: map[string]any{"prompt": "镜头缓缓推进，人物微笑", "image": "https://example.com/first-frame.png", "resolution": "720p", "seed": float64(7), "prompt_extend": false, "last_image": "https://example.com/last-frame.png"},
 			ratios: map[string]float64{"seconds": 5, "resolution": 2},
 		},
 		{
@@ -790,9 +793,9 @@ func TestMulerouterPluginRejectsEndpointsMissingFromItsTable(t *testing.T) {
 	}
 }
 
-// The plugin reads the upstream submit and poll responses as the Go MuleRouter
-// adaptor it replaced did: the task id, the gateway status, the failure reason
-// and the result URL.
+// The plugin reads MuleRouter's submit and poll responses in both shapes its
+// documentation gives (the carrothub endpoint YAML and the async task guide):
+// the task id, the gateway status, the failure reason and the result URL.
 func TestMulerouterPluginReadsTasks(t *testing.T) {
 	plugin := newMulerouterPlugin(t)
 	pluginAdaptor := taskplugin.New(plugin)
@@ -835,6 +838,12 @@ func TestMulerouterPluginReadsTasks(t *testing.T) {
 				"error at the top level",
 				`{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"failed","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:02:13Z"},"error":{"title":"External service execution failed","error_code":3005,"detail":"Kling task failed: video generation failed due to prompt violation"}}`,
 				"External service execution failed: Kling task failed: video generation failed due to prompt violation (error code 3005)",
+			},
+			{
+				// A refusal without a task carries no failed status, only the error.
+				"error without a task",
+				`{"error":{"title":"Invalid Request","error_code":3001,"detail":"prompt must not be empty"}}`,
+				"Invalid Request: prompt must not be empty (error code 3001)",
 			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -891,12 +900,13 @@ func TestMulerouterPluginReadsTasks(t *testing.T) {
 			{"succeeded", `{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"succeeded","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:00:00Z"},"videos":["https://example.com/video-749337402830284.mp4"]}`, model.TaskStatusSuccess, "https://example.com/video-749337402830284.mp4", ""},
 			// A success without any image, video or audio fails, so the host
 			// refunds the task.
-			{"completed without artifacts", `{"task_info":{"id":"up-1","status":"completed"}}`, model.TaskStatusFailure, "", "the task completed without producing any image, video or audio"},
-			{"succeeded with empty arrays", `{"task_info":{"id":"up-1","status":"succeeded"},"images":[],"videos":[],"audios":[]}`, model.TaskStatusFailure, "", "the task completed without producing any image, video or audio"},
+			{"success without artifacts", `{"task_info":{"id":"up-1","status":"succeeded"},"images":[],"videos":[],"audios":[]}`, model.TaskStatusFailure, "", "the task completed without producing any image, video or audio"},
 			// The carrothub ErrorResponse puts the error under task_info, the
 			// async task guide at the top level.
 			{"failed with the error under task_info", `{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"failed","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:00:00Z","error":{"code":3001,"title":"Invalid Request","detail":"Task execution failed"}}}`, model.TaskStatusFailure, "", "Invalid Request: Task execution failed (error code 3001)"},
 			{"failed with the error at the top level", `{"task_info":{"id":"123e4567-e89b-12d3-a456-426614174000","status":"failed","created_at":"2025-09-16T10:00:00Z","updated_at":"2025-09-16T10:02:13Z"},"error":{"title":"External service execution failed","error_code":3005,"detail":"Kling task failed: video generation failed due to prompt violation"}}`, model.TaskStatusFailure, "", "External service execution failed: Kling task failed: video generation failed due to prompt violation (error code 3005)"},
+			{"failed with an empty error under task_info and one at the top level", `{"task_info":{"id":"up-1","status":"failed","error":{}},"error":{"title":"External service execution failed","error_code":3005,"detail":"upstream timeout"}}`, model.TaskStatusFailure, "", "External service execution failed: upstream timeout (error code 3005)"},
+			{"failed with a string error under task_info and one at the top level", `{"task_info":{"id":"up-1","status":"failed","error":"internal"},"error":{"title":"External service execution failed","detail":"upstream timeout"}}`, model.TaskStatusFailure, "", "External service execution failed: upstream timeout"},
 			{"failed with title only", `{"task_info":{"id":"up-1","status":"failed","error":{"title":"Invalid Request"}}}`, model.TaskStatusFailure, "", "Invalid Request"},
 			{"failed with detail only", `{"error":{"detail":"Task execution failed"},"task_info":{"id":"up-1","status":"failed"}}`, model.TaskStatusFailure, "", "Task execution failed"},
 			{"failed without an error", `{"task_info":{"id":"up-1","status":"failed"}}`, model.TaskStatusFailure, "", "task failed"},

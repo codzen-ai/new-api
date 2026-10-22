@@ -98,7 +98,7 @@ function upstreamPath(modelName) {
 // MuleRouter model name behind the public model name.
 function endpointFor(ctx) {
   const name = ctx.upstreamModel || ctx.model;
-  if (!Object.prototype.hasOwnProperty.call(ENDPOINTS, name)) throw new Error("this model is not available on this channel");
+  if (!Object.hasOwn(ENDPOINTS, name)) throw new Error("this model is not available on this channel");
   const endpoint = ENDPOINTS[name];
   return { name: name, action: endpoint.action, fields: endpoint.fields, params: endpoint.params || [] };
 }
@@ -121,38 +121,6 @@ function quoted(value) {
   return JSON.stringify(String(value));
 }
 
-// fieldValue checks one declared field against its allowed values or bounds
-// and returns the key of its multiplier in field.values, or "" for a field
-// that does not affect the price.
-function fieldValue(name, field, raw) {
-  if (!field.integer) {
-    const key = String(raw);
-    if (!Object.prototype.hasOwnProperty.call(field.values, key)) {
-      throw new Error("invalid value " + quoted(key) + " for " + name + ", allowed: " + Object.keys(field.values).sort().join(", "));
-    }
-    return key;
-  }
-  let value = raw;
-  if (typeof raw === "string") {
-    const text = raw.trim();
-    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)) {
-      throw new Error("invalid value for " + name + ": " + quoted(raw) + " is not a number");
-    }
-    value = Number(text);
-  } else if (typeof raw !== "number") {
-    throw new Error("invalid value for " + name + ": " + String(raw) + " is not a number");
-  }
-  if (!Number.isInteger(value)) throw new Error(name + " must be an integer, got " + String(raw));
-  if (field.min !== undefined && value < field.min) throw new Error(name + " must be >= " + String(field.min));
-  if (field.max !== undefined && value > field.max) throw new Error(name + " must be <= " + String(field.max));
-  if (!field.values) return "";
-  // Integer keys enumerate in ascending order.
-  if (!Object.prototype.hasOwnProperty.call(field.values, String(value))) {
-    throw new Error("invalid value " + String(value) + " for " + name + ", allowed: " + Object.keys(field.values).join(", "));
-  }
-  return String(value);
-}
-
 // billingRatios validates the body that will be sent upstream against the
 // endpoint's fields and returns the multipliers they select, so metadata
 // cannot carry a multiplier past it.
@@ -165,8 +133,34 @@ function billingRatios(endpoint, params) {
       if (field.default === undefined) continue;
       raw = field.default;
     }
-    const key = fieldValue(name, field, raw);
-    if (!field.values) continue;
+    let key;
+    if (field.integer) {
+      let value = raw;
+      if (typeof raw === "string") {
+        const text = raw.trim();
+        if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)) {
+          throw new Error("invalid value for " + name + ": " + quoted(raw) + " is not a number");
+        }
+        value = Number(text);
+      } else if (typeof raw !== "number") {
+        throw new Error("invalid value for " + name + ": " + String(raw) + " is not a number");
+      }
+      if (!Number.isInteger(value)) throw new Error(name + " must be an integer, got " + String(raw));
+      if (field.min !== undefined && value < field.min) throw new Error(name + " must be >= " + String(field.min));
+      if (field.max !== undefined && value > field.max) throw new Error(name + " must be <= " + String(field.max));
+      // A field without values is bounded but does not affect the price.
+      if (!field.values) continue;
+      key = String(value);
+      // Integer keys enumerate in ascending order.
+      if (!Object.hasOwn(field.values, key)) {
+        throw new Error("invalid value " + key + " for " + name + ", allowed: " + Object.keys(field.values).join(", "));
+      }
+    } else {
+      key = String(raw);
+      if (!Object.hasOwn(field.values, key)) {
+        throw new Error("invalid value " + quoted(key) + " for " + name + ", allowed: " + Object.keys(field.values).sort().join(", "));
+      }
+    }
     const ratio = field.values[key];
     if (!(ratio > 0) || !Number.isFinite(ratio)) throw new Error(name + " produced a non-positive billing multiplier");
     ratios[field.ratio] = ratio;
@@ -174,7 +168,7 @@ function billingRatios(endpoint, params) {
   const undeclared = Object.keys(params)
     .filter(
       (key) =>
-        !Object.prototype.hasOwnProperty.call(endpoint.fields, key) &&
+        !Object.hasOwn(endpoint.fields, key) &&
         params[key] !== null &&
         params[key] !== undefined &&
         COST_FIELDS.indexOf(key) >= 0
@@ -216,24 +210,29 @@ export function extractUsage(ctx) {
   return billingRatios(endpointFor(ctx), upstreamParams(ctx.requestBody));
 }
 
-// failureReason reads a failed task's error: the carrothub endpoints put it
-// under task_info.error with a code, the async task guide at the top-level
-// error with an error_code. It returns the title, the detail and the code
-// that are present, or "" when neither place has an error.
+// failureReason reads a task's error: the carrothub endpoints put it under
+// task_info.error with a code, the async task guide at the top-level error
+// with an error_code. It returns the title, the detail and the code of the
+// first of the two that has any, or "" when neither does.
 function failureReason(body) {
   const info = (body && body.task_info) || {};
-  const error = info.error || (body && body.error);
-  if (!error || typeof error !== "object") return "";
-  let reason = error.title && error.detail ? error.title + ": " + error.detail : error.title || error.detail || "";
-  const code = error.error_code !== undefined && error.error_code !== null ? error.error_code : error.code;
-  if (code !== undefined && code !== null && code !== "") reason += (reason ? " " : "") + "(error code " + String(code) + ")";
-  return reason;
+  for (const error of [info.error, body && body.error]) {
+    if (!error || typeof error !== "object") continue;
+    let reason = error.title && error.detail ? error.title + ": " + error.detail : error.title || error.detail || "";
+    const code = error.error_code !== undefined && error.error_code !== null ? error.error_code : error.code;
+    if (code !== undefined && code !== null && code !== "") reason += (reason ? " " : "") + "(error code " + String(code) + ")";
+    if (reason) return reason;
+  }
+  return "";
 }
 
+// A submission fails when MuleRouter says so, or when it returns an error
+// instead of a task.
 export function parseSubmitResponse(_ctx, resp) {
   const info = resp.body && resp.body.task_info;
-  if (info && info.status === "failed") throw new Error("task failed: " + (failureReason(resp.body) || "no reason given"));
-  if (!info || !info.id) throw new Error("upstream returned no task id");
+  const reason = failureReason(resp.body);
+  if (info && info.status === "failed") throw new Error("task failed: " + (reason || "no reason given"));
+  if (!info || !info.id) throw new Error(reason ? "task failed: " + reason : "upstream returned no task id");
   return { taskId: info.id, taskData: resp.body };
 }
 
@@ -249,9 +248,10 @@ export function buildQueryRequest(ctx) {
   };
 }
 
-// The carrothub endpoint YAML says pending / processing / retrying /
-// completed / failed; the async task guide says queued / running / succeeded /
-// failed. Any other word is UNKNOWN, which the host counts as a failed poll.
+// The carrothub endpoint YAML says pending / processing / completed / failed,
+// and the carrothub wan2.2-i2v-spicy YAML adds retrying; the async task guide
+// says queued / running / succeeded / failed. Any other word is UNKNOWN,
+// which the host counts as a failed poll.
 const TASK_STATUSES = {
   pending: "SUBMITTED",
   queued: "SUBMITTED",
@@ -263,11 +263,15 @@ const TASK_STATUSES = {
   failed: "FAILURE",
 };
 
+// firstURL is the first non-empty string of a result list, or "".
+function firstURL(list) {
+  return (Array.isArray(list) && list.find((item) => typeof item === "string" && item !== "")) || "";
+}
+
 // A completed task carries its results under images, videos or audios.
 function resultURL(body) {
   for (const key of ["images", "videos", "audios"]) {
-    if (!Array.isArray(body[key])) continue;
-    const url = body[key].find((item) => typeof item === "string" && item !== "");
+    const url = firstURL(body[key]);
     if (url) return url;
   }
   return "";
@@ -287,11 +291,11 @@ export function parseTaskResult(_ctx, body) {
   return { status: status };
 }
 
-function videoURL(data) {
-  return data && Array.isArray(data.videos) && typeof data.videos[0] === "string" ? data.videos[0] : "";
+function resultVideoURL(data) {
+  return firstURL(data && data.videos);
 }
 
-function imageURLs(data) {
+function resultImageURLs(data) {
   if (!data || !Array.isArray(data.images)) return [];
   return data.images.filter((url) => typeof url === "string" && url !== "");
 }
@@ -308,18 +312,18 @@ const IMAGE_ARTIFACT_PREFIX = "image-";
 // plugin that claims openai_video without these two hooks.
 export function listArtifacts(task) {
   if (task.status !== "SUCCESS") return [];
-  const images = imageURLs(task.data);
+  const images = resultImageURLs(task.data);
   if (images.length) return images.map((_, index) => ({ key: IMAGE_ARTIFACT_PREFIX + (index + 1), type: "image" }));
-  return videoURL(task.data) ? [{ key: "video", type: "video" }] : [];
+  return resultVideoURL(task.data) ? [{ key: "video", type: "video" }] : [];
 }
 
 export function buildContentRequest(ctx) {
   const key = String(ctx.artifactKey || "");
   let url = "";
-  if (key === "video") url = videoURL(ctx.data);
+  if (key === "video") url = resultVideoURL(ctx.data);
   else if (key.startsWith(IMAGE_ARTIFACT_PREFIX)) {
     const position = key.slice(IMAGE_ARTIFACT_PREFIX.length);
-    if (/^[1-9][0-9]*$/.test(position)) url = imageURLs(ctx.data)[Number(position) - 1] || "";
+    if (/^[1-9][0-9]*$/.test(position)) url = resultImageURLs(ctx.data)[Number(position) - 1] || "";
   }
   if (!url) throw new Error("artifact_not_found");
   return { url: url, method: ctx.clientRequest.method, credentialless: true };
@@ -328,7 +332,7 @@ export function buildContentRequest(ctx) {
 // OPENAI_VIDEO_FIELDS maps the OpenAI video fields to the MuleRouter
 // parameter they spell, and normalizes their value.
 const OPENAI_VIDEO_FIELDS = {
-  seconds: { param: "duration", value: (raw) => integerText(raw) },
+  seconds: { param: "duration", value: integerAsNumber },
   // The short side of WIDTHxHEIGHT names the resolution: 1280x720 is 720p.
   size: {
     param: "resolution",
@@ -338,24 +342,24 @@ const OPENAI_VIDEO_FIELDS = {
       return String(Math.min(Number(match[1]), Number(match[2]))) + "p";
     },
   },
-  input_reference: { param: "image", value: (raw) => imageURL("input_reference", raw) },
+  input_reference: { param: "image", value: (raw) => requireImageURL("input_reference", raw) },
 };
 
 // The vendor spellings normalized the same way, so two spellings of one value
 // agree.
 const VENDOR_VALUES = {
-  duration: (raw) => integerText(raw),
-  image: (raw) => imageURL("image", raw),
+  duration: integerAsNumber,
+  image: (raw) => requireImageURL("image", raw),
 };
 
 // A whole number written as a string is sent as a number, which MuleRouter
 // requires; anything else is left for the endpoint's field check to refuse.
-function integerText(raw) {
+function integerAsNumber(raw) {
   return typeof raw === "string" && /^\s*[+-]?\d+\s*$/.test(raw) ? Number(raw) : raw;
 }
 
 // The JSON API takes the input image as a URL only.
-function imageURL(name, raw) {
+function requireImageURL(name, raw) {
   if (typeof raw !== "string" || !/^https?:\/\/\S+$/i.test(raw.trim())) throw new Error(name + " must be an image URL");
   return raw.trim();
 }
@@ -389,13 +393,13 @@ export const protocols = {
         if (entry.raw === null || entry.raw === undefined) continue;
         const alias = OPENAI_VIDEO_FIELDS[entry.key];
         const param = alias ? alias.param : entry.key;
-        if (!Object.prototype.hasOwnProperty.call(endpoint.fields, param) && endpoint.params.indexOf(param) < 0) {
+        if (!Object.hasOwn(endpoint.fields, param) && endpoint.params.indexOf(param) < 0) {
           if (unsupported.indexOf(entry.key) < 0) unsupported.push(entry.key);
           continue;
         }
         const normalize = alias ? alias.value : VENDOR_VALUES[param];
         const normalized = normalize ? normalize(entry.raw) : entry.raw;
-        if (Object.prototype.hasOwnProperty.call(params, param)) {
+        if (Object.hasOwn(params, param)) {
           if (JSON.stringify(params[param]) !== JSON.stringify(normalized)) {
             throw new Error(labels[param] + " and " + entry.label + " give different values");
           }
@@ -419,7 +423,7 @@ export const protocols = {
         if (Array.isArray(data[key]) && data[key].length) throw new Error("this model does not produce videos");
       }
       const video = {};
-      const url = videoURL(data);
+      const url = resultVideoURL(data);
       if (url) video.metadata = { url: url };
       if (task.status === "FAILURE") video.error = { message: task.fail_reason || "", code: "task_failed" };
       return video;
