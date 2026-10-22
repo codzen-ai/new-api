@@ -416,15 +416,16 @@ export const protocols = {
       return { kind: "submit", model: ctx.model, action: endpoint.action, requestBody: params };
     },
     // The host fills in id, object, model, status, progress and the
-    // timestamps; the plugin adds the result URL and the failure.
+    // timestamps; the plugin adds only the failure. The result URL stays out:
+    // it names MuleRouter, carrothub and the upstream task id, and callers
+    // download the video from GET /v1/videos/{task_id}/content, which the
+    // gateway proxies.
     render(_ctx, task) {
       const data = task.data || {};
       for (const key of ["images", "audios"]) {
         if (Array.isArray(data[key]) && data[key].length) throw new Error("this model does not produce videos");
       }
       const video = {};
-      const url = resultVideoURL(data);
-      if (url) video.metadata = { url: url };
       if (task.status === "FAILURE") video.error = { message: task.fail_reason || "", code: "task_failed" };
       return video;
     },
