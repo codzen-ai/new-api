@@ -90,12 +90,18 @@ function usageSchema(resolutions) {
   };
 }
 
-// Display examples: a 5-second video at each tier the model offers.
+// Display examples: a 5-second video at each tier the model offers, and a
+// 5-second 720p video with a reference video.
 function usageExamples(resolutions) {
-  return resolutions.map((resolution) => ({
+  const examples = resolutions.map((resolution) => ({
     label: resolution + " · 5s",
     facts: { tokens: Math.round(estimateTokens(5, resolution)), resolution: resolution, video_input: "none" },
   }));
+  examples.push({
+    label: "720p · 5s · reference video",
+    facts: { tokens: Math.round(estimateTokens(5, "720p")), resolution: "720p", video_input: "video" },
+  });
+  return examples;
 }
 
 // One usage profile per set of resolution tiers: the pricing page lists only
@@ -189,7 +195,7 @@ function mediaURL(name, raw) {
 // The media roles a caller may send. Audio roles have no price yet, and an
 // asset_id or material_id would name another caller's asset on the shared
 // MaaS account, so an item is exactly {type, url}.
-const MEDIA_TYPES = ["first_frame", "last_frame", "reference_image"];
+const MEDIA_TYPES = ["first_frame", "last_frame", "reference_image", "reference_video"];
 
 function mediaItems(raw) {
   if (!Array.isArray(raw)) throw new Error("media must be an array of {type, url} items");
@@ -317,6 +323,10 @@ function maasRequest(endpoint, body) {
   if (referenceImages > endpoint.maxReferenceImages) {
     throw new Error("media takes at most " + endpoint.maxReferenceImages + " reference images on this model, got " + referenceImages);
   }
+  const referenceVideos = media.filter((item) => item.type === "reference_video").length;
+  if (referenceVideos > endpoint.maxReferenceVideos) {
+    throw new Error("media takes at most " + endpoint.maxReferenceVideos + " reference videos on this model, got " + referenceVideos);
+  }
   if (media.length) maasBody.media = media;
   // Reference images alone are multi-image reference, a mode MaaS needs set.
   if (media.length && referenceImages === media.length) extraBody.reference_mode = "multi_ref";
@@ -324,7 +334,9 @@ function maasRequest(endpoint, body) {
   return {
     body: maasBody,
     action: hasImageInput ? "image_to_video" : "text_to_video",
-    facts: { tokens: estimateTokens(billedSeconds, resolution), resolution: resolution, video_input: "none" },
+    // A reference video selects its own token price; its length is not in
+    // the estimate, and the task settles on the tokens MaaS reports.
+    facts: { tokens: estimateTokens(billedSeconds, resolution), resolution: resolution, video_input: referenceVideos > 0 ? "video" : "none" },
   };
 }
 
