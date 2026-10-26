@@ -180,6 +180,29 @@ function sizeParams(raw) {
   return { resolution: resolution, aspect_ratio: aspectRatio };
 }
 
+// A media URL MaaS fetches itself: an absolute http(s) URL.
+function mediaURL(name, raw) {
+  if (typeof raw !== "string" || !/^https?:\/\/[^\s/]+\S*$/i.test(raw.trim())) throw new Error(name + " must be an http(s) URL");
+  return raw.trim();
+}
+
+// The media roles a caller may send. Audio roles have no price yet, and an
+// asset_id or material_id would name another caller's asset on the shared
+// MaaS account, so an item is exactly {type, url}.
+const MEDIA_TYPES = ["first_frame", "last_frame", "reference_image"];
+
+function mediaItems(raw) {
+  if (!Array.isArray(raw)) throw new Error("media must be an array of {type, url} items");
+  return raw.map((item, index) => {
+    const name = "media[" + index + "]";
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(name + " must be a {type, url} object");
+    const extra = Object.keys(item).filter((key) => key !== "type" && key !== "url");
+    if (extra.length) throw new Error(name + " takes only type and url; remove " + extra.join(", "));
+    if (MEDIA_TYPES.indexOf(item.type) < 0) throw new Error(name + ".type must be one of " + MEDIA_TYPES.join(", ") + ", got " + quoted(item.type));
+    return { type: item.type, url: mediaURL(name + ".url", item.url) };
+  });
+}
+
 // REQUEST_FIELDS maps every field the plugin takes, at the top level or
 // under metadata, to the request parameters it sets. Two fields that set one
 // parameter, or one field at the top level and under metadata, must agree.
@@ -198,6 +221,10 @@ const REQUEST_FIELDS = {
   },
   seed: (raw) => ({ seed: wholeNumber("seed", raw) }),
   output_format: (raw) => ({ output_format: raw }),
+  // OpenAI's input_reference, and image_url, name the first frame.
+  input_reference: (raw) => ({ first_frame: mediaURL("input_reference", raw) }),
+  image_url: (raw) => ({ first_frame: mediaURL("image_url", raw) }),
+  media: (raw) => ({ media: mediaItems(raw) }),
 };
 
 // Fields that configure the gateway, never the request.
@@ -234,7 +261,9 @@ function maasRequest(endpoint, body) {
     const set = field(entry.raw);
     for (const param of Object.keys(set)) {
       if (Object.hasOwn(params, param)) {
-        if (params[param] !== set[param]) throw new Error(labels[param] + " and " + entry.label + " give different values");
+        // media is an array: compare by value. mediaItems builds every item
+        // with its keys in one order, so equal lists encode the same.
+        if (JSON.stringify(params[param]) !== JSON.stringify(set[param])) throw new Error(labels[param] + " and " + entry.label + " give different values");
         continue;
       }
       params[param] = set[param];
@@ -279,9 +308,22 @@ function maasRequest(endpoint, body) {
   // -1 lets the model pick the length; the reservation covers the longest
   // one and the task settles on the tokens MaaS reports.
   const billedSeconds = duration === -1 ? durations.max : duration;
+  const maasBody = { model: endpoint.maasModel, prompt: params.prompt, seconds: duration, extra_body: extraBody };
+  if (Object.hasOwn(params, "first_frame")) maasBody.input_image_url = params.first_frame;
+  // Which media combine is MaaS's to judge: it refuses a bad combination
+  // when it creates the task, before anything is charged.
+  const media = params.media || [];
+  const referenceImages = media.filter((item) => item.type === "reference_image").length;
+  if (referenceImages > endpoint.maxReferenceImages) {
+    throw new Error("media takes at most " + endpoint.maxReferenceImages + " reference images on this model, got " + referenceImages);
+  }
+  if (media.length) maasBody.media = media;
+  // Reference images alone are multi-image reference, a mode MaaS needs set.
+  if (media.length && referenceImages === media.length) extraBody.reference_mode = "multi_ref";
+  const hasImageInput = Object.hasOwn(maasBody, "input_image_url") || media.length > 0;
   return {
-    body: { model: endpoint.maasModel, prompt: params.prompt, seconds: duration, extra_body: extraBody },
-    action: "text_to_video",
+    body: maasBody,
+    action: hasImageInput ? "image_to_video" : "text_to_video",
     facts: { tokens: estimateTokens(billedSeconds, resolution), resolution: resolution, video_input: "none" },
   };
 }
