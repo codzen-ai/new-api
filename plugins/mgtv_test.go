@@ -1,6 +1,7 @@
 package plugins_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,8 +9,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	taskdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	builtinplugins "github.com/QuantumNous/new-api/plugins"
+	"github.com/QuantumNous/new-api/relay"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	taskplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -375,4 +380,209 @@ func TestMgtvPluginServesOnlyPublicModelNames(t *testing.T) {
 			assert.NotContains(t, submission.Rejection, "msd-2-0-mini")
 		})
 	}
+}
+
+// Responses MaaS returned on GET /v1/videos/{id} for real tasks (signatures
+// redacted): a 5-second 720p seedance-2.5 video billed 108,900 tokens, and a
+// task that failed upstream and billed nothing.
+const (
+	mgtvResultURL        = "https://mgyun-maas-1382816285.cos.ap-beijing.myqcloud.com/82/2610/1615/0759/i1ZoIhp1SvZHF23h/612663996059676672.mp4?sign=q-sign-algorithm%3Dsha1%26q-signature%3Dredacted"
+	mgtvCompletedVideo   = `{"id":"8605ab6711f30f8e34e5fa441813912a","object":"video","model":"msd-2-5-260628","status":"completed","progress":100,"created_at":1792134304,"updated_at":1792134488,"url":"` + mgtvResultURL + `","usage":{"completion_tokens":108900,"output_tokens":108900,"total_tokens":108900,"video_seconds":5},"provider_task_id":"cgt-20261016150508-dp5k8","provider_usage":{"prompt_tokens":0,"completion_tokens":108900,"total_tokens":108900,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0},"tool_usage":{"web_search":0}},"provider_result_url":"https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedance-2-5/2122459029/Video/cgt-20261016150508-dp5k8.mp4?X-Tos-Signature=redacted"}`
+	mgtvFailedVideo      = `{"id":"22289b2c9dd8af41ce8b5061ba0f6dcf","object":"video","model":"msd-2-5-260628","status":"failed","progress":100,"created_at":1792138436,"updated_at":1792138599,"usage":{"video_seconds":5},"error":{"code":"upstream_invoke_failed","message":"上游服务处理失败，请稍后重试。"},"provider_task_id":"cgt-20261016161358-12olq"}`
+	mgtvUpstreamFailText = "上游服务处理失败，请稍后重试。"
+)
+
+// mgtvTask is a task the plugin submitted for seedance-2.5.
+func mgtvTask(status model.TaskStatus, failReason, data string) *model.Task {
+	task := &model.Task{
+		TaskID:      "task_public",
+		Platform:    constant.TaskPlatform(mgtvPluginKey),
+		Action:      "text_to_video",
+		Status:      status,
+		FailReason:  failReason,
+		CreatedAt:   1792134304,
+		UpdatedAt:   1792134488,
+		Properties:  model.Properties{OriginModelName: "seedance-2.5", UpstreamModelName: "seedance-2.5"},
+		PrivateData: model.TaskPrivateData{UpstreamTaskID: "8605ab6711f30f8e34e5fa441813912a"},
+		Data:        []byte(data),
+	}
+	if status == model.TaskStatusSuccess {
+		task.FinishTime = task.UpdatedAt
+	}
+	return task
+}
+
+// The plugin reads MaaS's submit and poll responses: the task id, the
+// gateway status, the failure reason, the result URL and the tokens the task
+// settles on.
+func TestMgtvPluginReadsTasks(t *testing.T) {
+	plugin := newMgtvPlugin(t)
+	adaptor := taskplugin.New(plugin)
+	info := mgtvPluginChannel()
+	info.OriginModelName, info.UpstreamModelName = "seedance-2.5", "seedance-2.5"
+	adaptor.Init(info)
+
+	t.Run("submit response", func(t *testing.T) {
+		submit := func(body string) (string, *taskdto.TaskError) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
+			parsed, taskErr := adaptor.ParseResponse(c, resp, info)
+			if taskErr != nil {
+				return "", taskErr
+			}
+			return parsed.UpstreamTaskID, nil
+		}
+		id, taskErr := submit(`{"id":"8605ab6711f30f8e34e5fa441813912a","object":"video","model":"msd-2-5-260628","status":"queued","progress":0,"created_at":1792134304}`)
+		require.Nil(t, taskErr)
+		assert.Equal(t, "8605ab6711f30f8e34e5fa441813912a", id)
+
+		_, taskErr = submit(`{"object":"video","status":"queued"}`)
+		require.NotNil(t, taskErr)
+	})
+
+	t.Run("query request", func(t *testing.T) {
+		var requested *http.Request
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requested = r
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"8605ab6711f30f8e34e5fa441813912a","status":"in_progress"}`)
+		}))
+		defer server.Close()
+		resp, err := adaptor.FetchTask(server.URL, "k", mgtvTask(model.TaskStatusInProgress, "", ""), "")
+		require.NoError(t, err)
+		resp.Body.Close()
+		require.NotNil(t, requested)
+		assert.Equal(t, http.MethodGet, requested.Method)
+		assert.Equal(t, "/v1/videos/8605ab6711f30f8e34e5fa441813912a", requested.URL.Path)
+		assert.Equal(t, "Bearer k", requested.Header.Get("Authorization"))
+	})
+
+	t.Run("poll results", func(t *testing.T) {
+		task := mgtvTask(model.TaskStatusInProgress, "", "")
+		cases := []struct {
+			name   string
+			body   string
+			status model.TaskStatus
+			url    string
+			reason string
+			// facts are the completion facts that replace the reservation; a
+			// task without them keeps the reserved tokens.
+			facts map[string]any
+		}{
+			{"queued", `{"id":"up-1","status":"queued","progress":0}`, model.TaskStatusSubmitted, "", "", nil},
+			{"pending", `{"id":"up-1","status":"pending"}`, model.TaskStatusSubmitted, "", "", nil},
+			{"in_progress", `{"id":"up-1","status":"in_progress","progress":40}`, model.TaskStatusInProgress, "", "", nil},
+			{"processing", `{"id":"up-1","status":"processing"}`, model.TaskStatusInProgress, "", "", nil},
+			{"running", `{"id":"up-1","status":"running"}`, model.TaskStatusInProgress, "", "", nil},
+			{"completed settles on the tokens MaaS reports", mgtvCompletedVideo, model.TaskStatusSuccess, mgtvResultURL, "", map[string]any{"tokens": float64(108900)}},
+			{"succeeded", `{"id":"up-1","status":"succeeded","url":"https://cdn.example/v.mp4","usage":{"completion_tokens":90000,"total_tokens":95000}}`, model.TaskStatusSuccess, "https://cdn.example/v.mp4", "", map[string]any{"tokens": float64(90000)}},
+			{"total_tokens without completion_tokens", `{"id":"up-1","status":"completed","url":"https://cdn.example/v.mp4","usage":{"total_tokens":95000}}`, model.TaskStatusSuccess, "https://cdn.example/v.mp4", "", map[string]any{"tokens": float64(95000)}},
+			{"zero completion_tokens falls back to total_tokens", `{"id":"up-1","status":"completed","url":"https://cdn.example/v.mp4","usage":{"completion_tokens":0,"total_tokens":95000}}`, model.TaskStatusSuccess, "https://cdn.example/v.mp4", "", map[string]any{"tokens": float64(95000)}},
+			{"no usage keeps the reservation", `{"id":"up-1","status":"completed","url":"https://cdn.example/v.mp4"}`, model.TaskStatusSuccess, "https://cdn.example/v.mp4", "", nil},
+			{"invalid usage keeps the reservation", `{"id":"up-1","status":"completed","url":"https://cdn.example/v.mp4","usage":{"completion_tokens":-5,"total_tokens":"lots"}}`, model.TaskStatusSuccess, "https://cdn.example/v.mp4", "", nil},
+			// A success with nothing to deliver fails, so the host refunds it.
+			{"completed without a url", `{"id":"up-1","status":"completed","usage":{"total_tokens":95000}}`, model.TaskStatusFailure, "", "the task completed without producing a video", nil},
+			// The reason is MaaS's own message, passed on as it is.
+			{"failed carries the upstream message", mgtvFailedVideo, model.TaskStatusFailure, "", mgtvUpstreamFailText, nil},
+			{"failed without a message", `{"id":"up-1","status":"failed"}`, model.TaskStatusFailure, "", "task failed", nil},
+			{"cancelled", `{"id":"up-1","status":"cancelled"}`, model.TaskStatusFailure, "", "task cancelled", nil},
+			{"expired", `{"id":"up-1","status":"expired","error":{"code":"expired","message":"task expired"}}`, model.TaskStatusFailure, "", "task expired", nil},
+			// An unknown status is a failed poll, never progress.
+			{"unknown status", `{"id":"up-1","status":"paused"}`, "UNKNOWN", "", "unknown task status: paused", nil},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				result, err := adaptor.ParseTaskResult(task, &http.Response{StatusCode: http.StatusOK}, []byte(tc.body))
+				require.NoError(t, err)
+				assert.Equal(t, string(tc.status), result.Status)
+				assert.Equal(t, tc.url, result.Url)
+				assert.Equal(t, tc.reason, result.Reason)
+				assert.Equal(t, tc.facts, result.UsageFacts)
+			})
+		}
+	})
+}
+
+// GET /v1/videos/{task_id} renders a task as an OpenAI video object without
+// anything that names MaaS or lets the caller bypass the gateway: no result
+// URL, usage, upstream task id, upstream usage or upstream result URL. The
+// video is downloaded from GET /v1/videos/{task_id}/content, which the
+// gateway proxies from the stored result URL without the channel key.
+func TestMgtvPluginRendersOpenAIVideo(t *testing.T) {
+	adaptor := relay.GetTaskAdaptor(constant.TaskPlatform(mgtvPluginKey))
+	require.NotNil(t, adaptor)
+	adaptor.Init(mgtvPluginChannel())
+	converter, ok := adaptor.(relaychannel.OpenAIVideoConverter)
+	require.True(t, ok)
+
+	cases := []struct {
+		name       string
+		status     model.TaskStatus
+		progress   string
+		failReason string
+		data       string
+		want       string
+	}{
+		{
+			name:   "queued",
+			status: model.TaskStatusSubmitted,
+			data:   `{"id":"8605ab6711f30f8e34e5fa441813912a","object":"video","model":"msd-2-5-260628","status":"queued","progress":0,"created_at":1792134304}`,
+			want:   `{"id":"task_public","object":"video","model":"seedance-2.5","status":"queued","progress":0,"created_at":1792134304}`,
+		},
+		{
+			name:     "completed",
+			status:   model.TaskStatusSuccess,
+			progress: "100%",
+			data:     mgtvCompletedVideo,
+			want:     `{"id":"task_public","object":"video","model":"seedance-2.5","status":"completed","progress":100,"created_at":1792134304,"completed_at":1792134488}`,
+		},
+		{
+			name:       "failed carries the failure reason",
+			status:     model.TaskStatusFailure,
+			progress:   "100%",
+			failReason: mgtvUpstreamFailText,
+			data:       mgtvFailedVideo,
+			want:       `{"id":"task_public","object":"video","model":"seedance-2.5","status":"failed","progress":100,"created_at":1792134304,"error":{"message":"` + mgtvUpstreamFailText + `","code":"task_failed"}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			task := mgtvTask(tc.status, tc.failReason, tc.data)
+			task.Progress = tc.progress
+			rendered, err := converter.ConvertToOpenAIVideo(task)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.want, string(rendered))
+		})
+	}
+
+	t.Run("content is the stored result URL, fetched without credentials", func(t *testing.T) {
+		artifacts, ok := adaptor.(relaychannel.TaskArtifactProvider)
+		require.True(t, ok)
+		provider, ok := adaptor.(relaychannel.TaskContentRequestProvider)
+		require.True(t, ok)
+
+		done := mgtvTask(model.TaskStatusSuccess, "", mgtvCompletedVideo)
+		listed, err := artifacts.ListArtifacts(done)
+		require.NoError(t, err)
+		assert.Equal(t, []relaychannel.TaskArtifact{{Key: "video", Type: "video"}}, listed)
+		descriptor, err := provider.BuildContentRequest(t.Context(), done, "video", relaychannel.TaskArtifactClientRequest{Method: http.MethodGet})
+		require.NoError(t, err)
+		assert.Equal(t, mgtvResultURL, descriptor.URL)
+		assert.Equal(t, http.MethodGet, descriptor.Method)
+		assert.True(t, descriptor.Credentialless)
+		assert.Empty(t, descriptor.Headers["Authorization"])
+
+		_, err = provider.BuildContentRequest(t.Context(), done, "thumbnail", relaychannel.TaskArtifactClientRequest{Method: http.MethodGet})
+		require.ErrorContains(t, err, "artifact_not_found")
+
+		for _, task := range []*model.Task{
+			mgtvTask(model.TaskStatusInProgress, "", `{"id":"up-1","status":"in_progress"}`),
+			mgtvTask(model.TaskStatusFailure, mgtvUpstreamFailText, mgtvFailedVideo),
+		} {
+			listed, err = artifacts.ListArtifacts(task)
+			require.NoError(t, err)
+			assert.Empty(t, listed, string(task.Status))
+		}
+	})
 }

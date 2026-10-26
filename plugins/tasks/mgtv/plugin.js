@@ -304,24 +304,88 @@ export function extractUsage(ctx) {
   return maasRequest(endpointFor(ctx), ctx.requestBody).facts;
 }
 
-export function parseSubmitResponse(_ctx, _resp) {
-  throw new Error("not implemented");
+// MaaS creates the task and answers queued; its id is the upstream task id.
+// The GET /v1/videos responses MaaS returns are the bare video object, not
+// the {code, data} envelope its OpenAPI document describes.
+export function parseSubmitResponse(_ctx, resp) {
+  const body = resp.body || {};
+  if (typeof body.id !== "string" || body.id === "") throw new Error("upstream returned no task id");
+  return { taskId: body.id, taskData: body };
 }
 
-export function buildQueryRequest(_ctx) {
-  throw new Error("not implemented");
+export function buildQueryRequest(ctx) {
+  return {
+    url: ctx.baseUrl + "/v1/videos/" + encodeURIComponent(ctx.taskId),
+    method: "GET",
+    headers: { Accept: "application/json", Authorization: "Bearer " + ctx.apiKey },
+  };
 }
 
-export function parseTaskResult(_ctx, _body) {
-  return { status: "UNKNOWN" };
+// The status words of the MaaS video object. Any other word is UNKNOWN,
+// which the host counts as a failed poll.
+const TASK_STATUSES = {
+  queued: "SUBMITTED",
+  pending: "SUBMITTED",
+  in_progress: "IN_PROGRESS",
+  processing: "IN_PROGRESS",
+  running: "IN_PROGRESS",
+  completed: "SUCCESS",
+  succeeded: "SUCCESS",
+  failed: "FAILURE",
+  cancelled: "FAILURE",
+  expired: "FAILURE",
+};
+
+function resultURL(body) {
+  return body && typeof body.url === "string" ? body.url.trim() : "";
 }
 
-export function listArtifacts(_task) {
-  return [];
+export function parseTaskResult(_ctx, body) {
+  const data = body || {};
+  const status = TASK_STATUSES[data.status];
+  if (!status) return { status: "UNKNOWN", reason: "unknown task status: " + String(data.status || "") };
+  if (status === "SUCCESS") {
+    // A success with nothing to deliver fails, so the host refunds it.
+    const url = resultURL(data);
+    if (!url) return { status: "FAILURE", reason: "the task completed without producing a video" };
+    return { status: status, progress: "100%", url: url };
+  }
+  if (status === "FAILURE") {
+    // MaaS's own message, as it is: callers need it to decide whether to
+    // retry or change the request (ADR-0003).
+    const message = data.error && typeof data.error.message === "string" ? data.error.message : "";
+    return { status: status, reason: message || "task " + data.status };
+  }
+  const result = { status: status };
+  if (data.progress > 0 && data.progress < 100) result.progress = data.progress + "%";
+  return result;
 }
 
-export function buildContentRequest(_ctx) {
-  throw new Error("artifact_not_found");
+// Settlement replaces the reserved tokens with the ones MaaS reports, and
+// keeps resolution and video_input from submission. Missing or invalid
+// usage returns no facts, which keeps the reservation.
+export function extractUsageOnComplete(_ctx, result, body) {
+  if (!result || result.status !== "SUCCESS") return null;
+  const usage = (body && body.usage) || {};
+  for (const tokens of [usage.completion_tokens, usage.total_tokens]) {
+    if (typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0) return { tokens: tokens };
+  }
+  return null;
+}
+
+// A completed task's video is its one artifact, which GET
+// /v1/videos/{task_id}/content streams. The stored url is a signed COS link
+// valid for 24 hours that needs no credentials; MaaS's own /content only
+// redirects to the same link, so the gateway fetches the link directly and
+// never sends the channel key to it.
+export function listArtifacts(task) {
+  return task.status === "SUCCESS" && resultURL(task.data) ? [{ key: "video", type: "video" }] : [];
+}
+
+export function buildContentRequest(ctx) {
+  const url = ctx.artifactKey === "video" ? resultURL(ctx.data) : "";
+  if (!url) throw new Error("artifact_not_found");
+  return { url: url, method: ctx.clientRequest.method, credentialless: true };
 }
 
 export const protocols = {
@@ -335,8 +399,15 @@ export const protocols = {
       const request = maasRequest(endpointFor(ctx), body.value);
       return { kind: "submit", model: ctx.model, action: request.action, requestBody: Object.assign({}, body.value, { model: ctx.model }) };
     },
-    render(_ctx, _task) {
-      return {};
+    // The host fills in id, object, model, status, progress and the
+    // timestamps; the plugin adds only the failure. Nothing of the MaaS
+    // video object goes out: its url, usage, provider_task_id,
+    // provider_usage and provider_result_url name the vendor or let the
+    // caller download around the gateway.
+    render(_ctx, task) {
+      const video = {};
+      if (task.status === "FAILURE") video.error = { message: task.fail_reason || "", code: "task_failed" };
+      return video;
     },
   },
 };
