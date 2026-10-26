@@ -8,8 +8,10 @@
 //   (the model picks the length), with the default an omitted duration sends.
 // - resolutions: its resolution tiers, in the gateway's spelling.
 // - aspectRatios: the aspect ratios it accepts.
-// - maxReferenceImages / maxReferenceVideos: the media limits.
-// - outputFormats: the container formats it takes, if any.
+// - maxMedia: the most media items of each limited role it takes.
+// - outputFormats: the container formats it takes; a model without them
+//   refuses output_format.
+// An omitted resolution is DEFAULT_RESOLUTION, which every endpoint offers.
 // Request validation, the upstream model name and the usage facts are all
 // derived from this table.
 const ENDPOINTS = {
@@ -18,8 +20,7 @@ const ENDPOINTS = {
     durations: { min: 4, max: 30, auto: true, default: -1 },
     resolutions: ["480p", "720p", "1080p"],
     aspectRatios: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"],
-    maxReferenceImages: 30,
-    maxReferenceVideos: 10,
+    maxMedia: { reference_image: 30, reference_video: 10 },
     outputFormats: ["mp4", "mov"],
   },
   "seedance-2.0-pro": {
@@ -27,26 +28,26 @@ const ENDPOINTS = {
     durations: { min: 4, max: 15, auto: false, default: 5 },
     resolutions: ["480p", "720p", "1080p", "4k"],
     aspectRatios: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
-    maxReferenceImages: 9,
-    maxReferenceVideos: 3,
+    maxMedia: { reference_image: 9, reference_video: 3 },
   },
   "seedance-2.0-fast": {
     maasModel: "msd-2-0-fast-260128",
     durations: { min: 4, max: 15, auto: false, default: 5 },
     resolutions: ["480p", "720p"],
     aspectRatios: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
-    maxReferenceImages: 9,
-    maxReferenceVideos: 3,
+    maxMedia: { reference_image: 9, reference_video: 3 },
   },
   "seedance-2.0-mini": {
     maasModel: "msd-2-0-mini-260615",
     durations: { min: 4, max: 15, auto: false, default: 5 },
     resolutions: ["480p", "720p"],
     aspectRatios: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
-    maxReferenceImages: 9,
-    maxReferenceVideos: 3,
+    maxMedia: { reference_image: 9, reference_video: 3 },
   },
 };
+
+// The resolution an omitted one sends (spec #48).
+const DEFAULT_RESOLUTION = "720p";
 
 // Every resolution tier, in the gateway's spelling, with the spelling MaaS
 // takes and the 16:9 max-pixel size the token estimate uses.
@@ -91,15 +92,15 @@ function usageSchema(resolutions) {
 }
 
 // Display examples: a 5-second video at each tier the model offers, and a
-// 5-second 720p video with a reference video.
+// 5-second video at the default resolution with a reference video.
 function usageExamples(resolutions) {
   const examples = resolutions.map((resolution) => ({
     label: resolution + " · 5s",
     facts: { tokens: Math.round(estimateTokens(5, resolution)), resolution: resolution, video_input: "none" },
   }));
   examples.push({
-    label: "720p · 5s · reference video",
-    facts: { tokens: Math.round(estimateTokens(5, "720p")), resolution: "720p", video_input: "video" },
+    label: DEFAULT_RESOLUTION + " · 5s · reference video",
+    facts: { tokens: Math.round(estimateTokens(5, DEFAULT_RESOLUTION)), resolution: DEFAULT_RESOLUTION, video_input: "video" },
   });
   return examples;
 }
@@ -163,9 +164,15 @@ function wholeNumber(name, raw) {
   return value;
 }
 
-// The aspect ratios a WIDTHxHEIGHT size can name, and the resolution tier of
-// its short side.
-const SIZE_ASPECT_RATIOS = ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
+// The aspect ratios a WIDTHxHEIGHT size can name, which are the W:H ratios
+// the endpoints take (adaptive has no size), and the resolution tier of its
+// short side.
+const SIZE_ASPECT_RATIOS = [];
+for (const endpoint of Object.values(ENDPOINTS)) {
+  for (const ratio of endpoint.aspectRatios) {
+    if (/^\d+:\d+$/.test(ratio) && SIZE_ASPECT_RATIOS.indexOf(ratio) < 0) SIZE_ASPECT_RATIOS.push(ratio);
+  }
+}
 const SIZE_SHORT_SIDES = { 480: "480p", 720: "720p", 1080: "1080p", 2160: "4k" };
 
 // The OpenAI size WIDTHxHEIGHT names a resolution by its short side and an
@@ -210,7 +217,8 @@ function mediaItems(raw) {
 }
 
 // REQUEST_FIELDS maps every field the plugin takes, at the top level or
-// under metadata, to the request parameters it sets. Two fields that set one
+// under metadata, to the request parameters it sets on the endpoint, or to
+// nothing when the endpoint does not take it. Two fields that set one
 // parameter, or one field at the top level and under metadata, must agree.
 // Any other field is refused, so no unpriced or unbounded field, nor an
 // asset_id naming another caller's upstream asset, reaches MaaS.
@@ -226,7 +234,7 @@ const REQUEST_FIELDS = {
     return { with_audio: raw };
   },
   seed: (raw) => ({ seed: wholeNumber("seed", raw) }),
-  output_format: (raw) => ({ output_format: raw }),
+  output_format: (raw, endpoint) => (endpoint.outputFormats ? { output_format: raw } : null),
   // OpenAI's input_reference, and image_url, name the first frame.
   input_reference: (raw) => ({ first_frame: mediaURL("input_reference", raw) }),
   image_url: (raw) => ({ first_frame: mediaURL("image_url", raw) }),
@@ -260,11 +268,11 @@ function maasRequest(endpoint, body) {
     // A null field is the endpoint's default.
     if (entry.raw === null || entry.raw === undefined) continue;
     const field = REQUEST_FIELDS[entry.key];
-    if (!field || (entry.key === "output_format" && !endpoint.outputFormats)) {
+    const set = field ? field(entry.raw, endpoint) : null;
+    if (!set) {
       if (unsupported.indexOf(entry.key) < 0) unsupported.push(entry.key);
       continue;
     }
-    const set = field(entry.raw);
     for (const param of Object.keys(set)) {
       if (Object.hasOwn(params, param)) {
         // media is an array: compare by value. mediaItems builds every item
@@ -291,10 +299,17 @@ function maasRequest(endpoint, body) {
     );
   }
 
-  const resolution = params.resolution || "720p";
+  const resolution = params.resolution || DEFAULT_RESOLUTION;
   if (endpoint.resolutions.indexOf(resolution) < 0) {
     throw new Error("resolution must be one of " + endpoint.resolutions.join(", ") + " on this model, got " + quoted(resolution));
   }
+  // extra_body keys are spelled as MaaS spells them: aspectRatio and
+  // withAudio in camelCase, output_format and reference_mode in snake_case.
+  // Sources: the VideoCreateReq.extra_body description in MaaS's OpenAPI
+  // document ("可传 aspectRatio/fps/withAudio/webSearch/seed 等",
+  // "extra_body.reference_mode 中传 multi_ref") and the modeProfiles
+  // parameters GET /v1/models lists for the Seedance models (aspectRatio,
+  // withAudio, output_format, resolution).
   const extraBody = { resolution: RESOLUTIONS[resolution].maas };
   if (Object.hasOwn(params, "aspect_ratio")) {
     if (endpoint.aspectRatios.indexOf(params.aspect_ratio) < 0) {
@@ -319,24 +334,24 @@ function maasRequest(endpoint, body) {
   // Which media combine is MaaS's to judge: it refuses a bad combination
   // when it creates the task, before anything is charged.
   const media = params.media || [];
-  const referenceImages = media.filter((item) => item.type === "reference_image").length;
-  if (referenceImages > endpoint.maxReferenceImages) {
-    throw new Error("media takes at most " + endpoint.maxReferenceImages + " reference images on this model, got " + referenceImages);
-  }
-  const referenceVideos = media.filter((item) => item.type === "reference_video").length;
-  if (referenceVideos > endpoint.maxReferenceVideos) {
-    throw new Error("media takes at most " + endpoint.maxReferenceVideos + " reference videos on this model, got " + referenceVideos);
+  const roleCounts = {};
+  for (const item of media) roleCounts[item.type] = (roleCounts[item.type] || 0) + 1;
+  for (const role of Object.keys(endpoint.maxMedia)) {
+    const count = roleCounts[role] || 0;
+    if (count > endpoint.maxMedia[role]) {
+      throw new Error("media takes at most " + endpoint.maxMedia[role] + " " + role.replace("_", " ") + "s on this model, got " + count);
+    }
   }
   if (media.length) maasBody.media = media;
   // Reference images alone are multi-image reference, a mode MaaS needs set.
-  if (media.length && referenceImages === media.length) extraBody.reference_mode = "multi_ref";
+  if (media.length && roleCounts.reference_image === media.length) extraBody.reference_mode = "multi_ref";
   const hasImageInput = Object.hasOwn(maasBody, "input_image_url") || media.length > 0;
   return {
     body: maasBody,
     action: hasImageInput ? "image_to_video" : "text_to_video",
     // A reference video selects its own token price; its length is not in
     // the estimate, and the task settles on the tokens MaaS reports.
-    facts: { tokens: estimateTokens(billedSeconds, resolution), resolution: resolution, video_input: referenceVideos > 0 ? "video" : "none" },
+    facts: { tokens: estimateTokens(billedSeconds, resolution), resolution: resolution, video_input: roleCounts.reference_video ? "video" : "none" },
   };
 }
 

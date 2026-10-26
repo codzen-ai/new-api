@@ -104,7 +104,7 @@ func submitToMgtvPlugin(t *testing.T, plugin *jsplugin.LoadedPlugin, c *gin.Cont
 	return mgtvSubmission{
 		URL:           url,
 		Authorization: upstream.Header.Get("Authorization"),
-		Body:          readMulerouterBody(t, reader),
+		Body:          readJSONBody(t, reader),
 		Facts:         facts,
 		Action:        info.Action,
 	}
