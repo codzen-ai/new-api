@@ -26,7 +26,8 @@ _Avoid_: Alias, short name, client model
 
 **MaaS**:
 MGTV Cloud's model service at `maas-api-pub.cloud.mgtv.com`, which the mgtv task plugin drives through its OpenAI-compatible `/v1/videos` API. Its video models are Seedance 2.x from Volcengine Ark under MaaS model names such as `msd-2-5-260628`, which clients never send or see; the gateway sells them as their own product, apart from the doubao plugin's Seedance models (ADR-0003).
-_Avoid_: MGTV (the company), MSD, Mango
+The plugin key `mgtv` and its display name "MGTV MaaS" name the company only to qualify the service.
+_Avoid_: MGTV alone (that is the company), MSD, Mango
 
 **Vendor parameter**:
 A request field specific to one MuleRouter endpoint (such as width or prompt_extend), outside the gateway's unified task vocabulary. Clients send vendor parameters at the top level of the request or under `metadata`; both count.
