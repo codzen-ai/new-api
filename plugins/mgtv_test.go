@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -346,6 +347,139 @@ func TestMgtvPluginTextToVideoSubmissions(t *testing.T) {
 					continue
 				}
 				assert.Equal(t, mgtvSubmission{URL: mgtvSubmitURL, Authorization: "Bearer k", Body: tc.upload, Facts: tc.facts, Action: "text_to_video"}, submission, entry)
+			}
+		})
+	}
+}
+
+// mgtvReferenceImages is a media list of n reference images, as the client
+// writes it; mgtvReferenceImageItems is the same list as MaaS receives it.
+func mgtvReferenceImages(n int) string {
+	items := make([]string, n)
+	for i := range n {
+		items[i] = `{"type":"reference_image","url":"https://cdn.example/` + strconv.Itoa(i) + `.png"}`
+	}
+	return "[" + strings.Join(items, ",") + "]"
+}
+
+func mgtvReferenceImageItems(n int) []any {
+	items := make([]any, n)
+	for i := range n {
+		items[i] = map[string]any{"type": "reference_image", "url": "https://cdn.example/" + strconv.Itoa(i) + ".png"}
+	}
+	return items
+}
+
+// A submission with image inputs, a first frame, a first and last frame or
+// reference images, sends them to MaaS as image URLs and is an image-to-video
+// task billed like text-to-video. Whether the combination of media makes sense
+// is MaaS's to judge: it refuses a bad one when the task is created, before
+// anything is charged. Both entries must send and bill exactly the same.
+func TestMgtvPluginImageInputSubmissions(t *testing.T) {
+	plugin := newMgtvPlugin(t)
+	facts720p5s := map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"}
+	cases := []struct {
+		name   string
+		model  string
+		body   string
+		upload map[string]any
+		facts  map[string]any
+		reject string
+	}{
+		{
+			name:   "input_reference is the first frame",
+			model:  "seedance-2.0-pro",
+			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","input_reference":"https://cdn.example/first.png"}`,
+			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "input_image_url": "https://cdn.example/first.png", "extra_body": map[string]any{"resolution": "720p"}},
+			facts:  facts720p5s,
+		},
+		{
+			name:   "image_url is the first frame, under metadata too",
+			model:  "seedance-2.5",
+			body:   `{"model":"seedance-2.5","prompt":"a cat","seconds":5,"metadata":{"image_url":"https://cdn.example/first.png"}}`,
+			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(5), "input_image_url": "https://cdn.example/first.png", "extra_body": map[string]any{"resolution": "720p"}},
+			facts:  facts720p5s,
+		},
+		{
+			name:   "input_reference and image_url that agree",
+			model:  "seedance-2.0-mini",
+			body:   `{"model":"seedance-2.0-mini","prompt":"a cat","input_reference":"https://cdn.example/first.png","image_url":"https://cdn.example/first.png"}`,
+			upload: map[string]any{"model": "msd-2-0-mini-260615", "prompt": "a cat", "seconds": float64(5), "input_image_url": "https://cdn.example/first.png", "extra_body": map[string]any{"resolution": "720p"}},
+			facts:  facts720p5s,
+		},
+		{
+			name:  "media carries a first and a last frame",
+			model: "seedance-2.0-fast",
+			body:  `{"model":"seedance-2.0-fast","prompt":"a cat","media":[{"type":"first_frame","url":"https://cdn.example/first.png"},{"type":"last_frame","url":"https://cdn.example/last.png"}]}`,
+			upload: map[string]any{"model": "msd-2-0-fast-260128", "prompt": "a cat", "seconds": float64(5), "media": []any{
+				map[string]any{"type": "first_frame", "url": "https://cdn.example/first.png"},
+				map[string]any{"type": "last_frame", "url": "https://cdn.example/last.png"},
+			}, "extra_body": map[string]any{"resolution": "720p"}},
+			facts: facts720p5s,
+		},
+		{
+			// Reference images alone ask MaaS for multi-image reference, which
+			// the caller need not set.
+			name:  "reference images set the multi-image reference mode",
+			model: "seedance-2.5",
+			body:  `{"model":"seedance-2.5","prompt":"a cat","seconds":5,"metadata":{"media":[{"type":"reference_image","url":"https://cdn.example/a.png"},{"type":"reference_image","url":"https://cdn.example/b.png"}]}}`,
+			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(5), "media": []any{
+				map[string]any{"type": "reference_image", "url": "https://cdn.example/a.png"},
+				map[string]any{"type": "reference_image", "url": "https://cdn.example/b.png"},
+			}, "extra_body": map[string]any{"resolution": "720p", "reference_mode": "multi_ref"}},
+			facts: facts720p5s,
+		},
+		{
+			name:   "2.5 takes 30 reference images",
+			model:  "seedance-2.5",
+			body:   `{"model":"seedance-2.5","prompt":"a cat","seconds":5,"media":` + mgtvReferenceImages(30) + `}`,
+			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(5), "media": mgtvReferenceImageItems(30), "extra_body": map[string]any{"resolution": "720p", "reference_mode": "multi_ref"}},
+			facts:  facts720p5s,
+		},
+		{
+			name:   "2.0 takes 9 reference images",
+			model:  "seedance-2.0-pro",
+			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","media":` + mgtvReferenceImages(9) + `}`,
+			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "media": mgtvReferenceImageItems(9), "extra_body": map[string]any{"resolution": "720p", "reference_mode": "multi_ref"}},
+			facts:  facts720p5s,
+		},
+		{
+			// Mixing a first frame with reference images is MaaS's to refuse; a
+			// media list that is not reference images alone sets no mode.
+			name:  "media that mixes roles is forwarded without a reference mode",
+			model: "seedance-2.0-mini",
+			body:  `{"model":"seedance-2.0-mini","prompt":"a cat","media":[{"type":"first_frame","url":"https://cdn.example/first.png"},{"type":"reference_image","url":"https://cdn.example/a.png"}]}`,
+			upload: map[string]any{"model": "msd-2-0-mini-260615", "prompt": "a cat", "seconds": float64(5), "media": []any{
+				map[string]any{"type": "first_frame", "url": "https://cdn.example/first.png"},
+				map[string]any{"type": "reference_image", "url": "https://cdn.example/a.png"},
+			}, "extra_body": map[string]any{"resolution": "720p"}},
+			facts: facts720p5s,
+		},
+		{name: "2.5 above 30 reference images", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":` + mgtvReferenceImages(31) + `}`, reject: "media takes at most 30 reference images on this model, got 31"},
+		{name: "2.0 above 9 reference images", model: "seedance-2.0-fast", body: `{"model":"seedance-2.0-fast","prompt":"a cat","media":` + mgtvReferenceImages(10) + `}`, reject: "media takes at most 9 reference images on this model, got 10"},
+		{name: "a media item with an asset_id", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_image","url":"https://cdn.example/a.png","asset_id":"a1"}]}`, reject: "media[0] takes only type and url; remove asset_id"},
+		{name: "a media item that is only an asset_id", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_image","asset_id":"a1"}]}`, reject: "media[0] takes only type and url; remove asset_id"},
+		{name: "a media url that is not http(s)", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"first_frame","url":"https://cdn.example/a.png"},{"type":"last_frame","url":"ftp://cdn.example/b.png"}]}`, reject: "media[1].url must be an http(s) URL"},
+		{name: "a media item without a url", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"first_frame"}]}`, reject: "media[0].url must be an http(s) URL"},
+		{name: "an audio media role", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_audio","url":"https://cdn.example/a.mp3"}]}`, reject: `media[0].type must be one of first_frame, last_frame, reference_image, got "reference_audio"`},
+		{name: "a reference video is not taken yet", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_video","url":"https://cdn.example/a.mp4"}]}`, reject: `media[0].type must be one of first_frame, last_frame, reference_image, got "reference_video"`},
+		{name: "media that is not an array", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":{"type":"first_frame","url":"https://cdn.example/a.png"}}`, reject: "media must be an array of {type, url} items"},
+		{name: "input_reference and image_url that disagree", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","input_reference":"https://cdn.example/a.png","image_url":"https://cdn.example/b.png"}`, reject: "image_url and input_reference give different values"},
+		{name: "a first frame that is not an http(s) URL", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","input_reference":"data:image/png;base64,AAAA"}`, reject: "input_reference must be an http(s) URL"},
+		{name: "a first frame that is not a string", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","image_url":{"url":"https://cdn.example/a.png"}}`, reject: "image_url must be an http(s) URL"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for entry, submission := range map[string]mgtvSubmission{
+				"/v1/videos":     submitThroughMgtvVideosAPI(t, plugin, tc.model, "", tc.body),
+				"/v1/tasks/mgtv": submitThroughMgtvTasksEntry(t, plugin, tc.model, tc.body),
+			} {
+				if tc.reject != "" {
+					assert.Contains(t, submission.Rejection, tc.reject, entry)
+					assert.NotContains(t, submission.Rejection, "msd-", entry)
+					continue
+				}
+				assert.Equal(t, mgtvSubmission{URL: mgtvSubmitURL, Authorization: "Bearer k", Body: tc.upload, Facts: tc.facts, Action: "image_to_video"}, submission, entry)
 			}
 		})
 	}
