@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	builtinplugins "github.com/QuantumNous/new-api/plugins"
 	"github.com/QuantumNous/new-api/relay"
@@ -19,6 +20,8 @@ import (
 	taskplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -154,7 +157,8 @@ func TestMgtvPluginIsABuiltInPluginOnTaskPluginChannelsOnly(t *testing.T) {
 }
 
 // Every model prices the same three facts, and the pricing page lists only
-// the resolution tiers the model offers, each with a 5-second example.
+// the resolution tiers the model offers, each with a 5-second example, and a
+// 5-second 720p example with a reference video.
 func TestMgtvPluginUsageProfiles(t *testing.T) {
 	plugin := newMgtvPlugin(t)
 	for _, tc := range []struct {
@@ -173,13 +177,19 @@ func TestMgtvPluginUsageProfiles(t *testing.T) {
 			assert.Equal(t, "Billing token unit price", schema["tokens"].Description["en"])
 			assert.Equal(t, tc.resolutions, schema["resolution"].Enum)
 			assert.Equal(t, []string{"none", "video"}, schema["video_input"].Enum)
-			require.Len(t, examples, len(tc.resolutions))
-			for _, example := range examples {
-				assert.Contains(t, tc.resolutions, example.Facts["resolution"], example.Label)
+			require.Len(t, examples, len(tc.resolutions)+1)
+			tiers := examples[:len(tc.resolutions)]
+			for i, example := range tiers {
+				assert.Equal(t, tc.resolutions[i], example.Facts["resolution"], example.Label)
 				assert.Equal(t, "none", example.Facts["video_input"], example.Label)
 			}
-			assert.Equal(t, "720p · 5s", examples[1].Label)
-			assert.EqualValues(t, 108000, examples[1].Facts["tokens"])
+			assert.Equal(t, "720p · 5s", tiers[1].Label)
+			assert.EqualValues(t, 108000, tiers[1].Facts["tokens"])
+			withVideo := examples[len(tc.resolutions)]
+			assert.Equal(t, "720p · 5s · reference video", withVideo.Label)
+			assert.EqualValues(t, 108000, withVideo.Facts["tokens"])
+			assert.Equal(t, "720p", withVideo.Facts["resolution"])
+			assert.Equal(t, "video", withVideo.Facts["video_input"])
 		})
 	}
 }
@@ -352,32 +362,36 @@ func TestMgtvPluginTextToVideoSubmissions(t *testing.T) {
 	}
 }
 
-// mgtvReferenceImages is a media list of n reference images, as the client
-// writes it; mgtvReferenceImageItems is the same list as MaaS receives it.
-func mgtvReferenceImages(n int) string {
+// mgtvMedia is a media list of n items of one role, as the client writes it;
+// mgtvMediaItems is the same list as MaaS receives it.
+func mgtvMedia(role string, n int) string {
 	items := make([]string, n)
 	for i := range n {
-		items[i] = `{"type":"reference_image","url":"https://cdn.example/` + strconv.Itoa(i) + `.png"}`
+		items[i] = `{"type":"` + role + `","url":"https://cdn.example/` + role + `-` + strconv.Itoa(i) + `"}`
 	}
 	return "[" + strings.Join(items, ",") + "]"
 }
 
-func mgtvReferenceImageItems(n int) []any {
+func mgtvMediaItems(role string, n int) []any {
 	items := make([]any, n)
 	for i := range n {
-		items[i] = map[string]any{"type": "reference_image", "url": "https://cdn.example/" + strconv.Itoa(i) + ".png"}
+		items[i] = map[string]any{"type": role, "url": "https://cdn.example/" + role + "-" + strconv.Itoa(i)}
 	}
 	return items
 }
 
-// A submission with image inputs, a first frame, a first and last frame or
-// reference images, sends them to MaaS as image URLs and is an image-to-video
-// task billed like text-to-video. Whether the combination of media makes sense
-// is MaaS's to judge: it refuses a bad one when the task is created, before
-// anything is charged. Both entries must send and bill exactly the same.
-func TestMgtvPluginImageInputSubmissions(t *testing.T) {
+// A submission with media inputs, a first frame, a first and last frame,
+// reference images or reference videos, sends them to MaaS as URLs and is an
+// image-to-video task. Image inputs bill like text-to-video; a reference video
+// bills video_input "video", and its own length adds nothing to the token
+// estimate: the task settles on the tokens MaaS reports. Whether the
+// combination of media makes sense is MaaS's to judge: it refuses a bad one
+// when the task is created, before anything is charged. Both entries must
+// send and bill exactly the same.
+func TestMgtvPluginMediaInputSubmissions(t *testing.T) {
 	plugin := newMgtvPlugin(t)
 	facts720p5s := map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"}
+	withVideo720p5s := map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "video"}
 	cases := []struct {
 		name   string
 		model  string
@@ -432,15 +446,15 @@ func TestMgtvPluginImageInputSubmissions(t *testing.T) {
 		{
 			name:   "2.5 takes 30 reference images",
 			model:  "seedance-2.5",
-			body:   `{"model":"seedance-2.5","prompt":"a cat","seconds":5,"media":` + mgtvReferenceImages(30) + `}`,
-			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(5), "media": mgtvReferenceImageItems(30), "extra_body": map[string]any{"resolution": "720p", "reference_mode": "multi_ref"}},
+			body:   `{"model":"seedance-2.5","prompt":"a cat","seconds":5,"media":` + mgtvMedia("reference_image", 30) + `}`,
+			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(5), "media": mgtvMediaItems("reference_image", 30), "extra_body": map[string]any{"resolution": "720p", "reference_mode": "multi_ref"}},
 			facts:  facts720p5s,
 		},
 		{
 			name:   "2.0 takes 9 reference images",
 			model:  "seedance-2.0-pro",
-			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","media":` + mgtvReferenceImages(9) + `}`,
-			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "media": mgtvReferenceImageItems(9), "extra_body": map[string]any{"resolution": "720p", "reference_mode": "multi_ref"}},
+			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","media":` + mgtvMedia("reference_image", 9) + `}`,
+			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "media": mgtvMediaItems("reference_image", 9), "extra_body": map[string]any{"resolution": "720p", "reference_mode": "multi_ref"}},
 			facts:  facts720p5s,
 		},
 		{
@@ -455,14 +469,51 @@ func TestMgtvPluginImageInputSubmissions(t *testing.T) {
 			}, "extra_body": map[string]any{"resolution": "720p"}},
 			facts: facts720p5s,
 		},
-		{name: "2.5 above 30 reference images", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":` + mgtvReferenceImages(31) + `}`, reject: "media takes at most 30 reference images on this model, got 31"},
-		{name: "2.0 above 9 reference images", model: "seedance-2.0-fast", body: `{"model":"seedance-2.0-fast","prompt":"a cat","media":` + mgtvReferenceImages(10) + `}`, reject: "media takes at most 9 reference images on this model, got 10"},
+		{
+			// The staging verification request of spec #48 with a reference video.
+			name:   "a reference video bills the reference-video tier",
+			model:  "seedance-2.0-mini",
+			body:   `{"model":"seedance-2.0-mini","prompt":"a cat","media":[{"type":"reference_video","url":"https://cdn.example/a.mp4"}]}`,
+			upload: map[string]any{"model": "msd-2-0-mini-260615", "prompt": "a cat", "seconds": float64(5), "media": []any{map[string]any{"type": "reference_video", "url": "https://cdn.example/a.mp4"}}, "extra_body": map[string]any{"resolution": "720p"}},
+			facts:  withVideo720p5s,
+		},
+		{
+			// Reference images with a reference video are not image reference
+			// alone, so no reference mode is set.
+			name:  "a reference video with reference images, under metadata",
+			model: "seedance-2.5",
+			body:  `{"model":"seedance-2.5","prompt":"a cat","seconds":5,"metadata":{"media":[{"type":"reference_image","url":"https://cdn.example/a.png"},{"type":"reference_video","url":"https://cdn.example/b.mp4"},{"type":"reference_image","url":"https://cdn.example/c.png"}]}}`,
+			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(5), "media": []any{
+				map[string]any{"type": "reference_image", "url": "https://cdn.example/a.png"},
+				map[string]any{"type": "reference_video", "url": "https://cdn.example/b.mp4"},
+				map[string]any{"type": "reference_image", "url": "https://cdn.example/c.png"},
+			}, "extra_body": map[string]any{"resolution": "720p"}},
+			facts: withVideo720p5s,
+		},
+		{
+			name:   "2.5 takes 10 reference videos",
+			model:  "seedance-2.5",
+			body:   `{"model":"seedance-2.5","prompt":"a cat","seconds":5,"media":` + mgtvMedia("reference_video", 10) + `}`,
+			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(5), "media": mgtvMediaItems("reference_video", 10), "extra_body": map[string]any{"resolution": "720p"}},
+			facts:  withVideo720p5s,
+		},
+		{
+			name:   "2.0 takes 3 reference videos",
+			model:  "seedance-2.0-pro",
+			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","resolution":"1080p","media":` + mgtvMedia("reference_video", 3) + `}`,
+			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "media": mgtvMediaItems("reference_video", 3), "extra_body": map[string]any{"resolution": "1080p"}},
+			facts:  map[string]any{"tokens": float64(5 * 48600), "resolution": "1080p", "video_input": "video"},
+		},
+		{name: "2.5 above 10 reference videos", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":` + mgtvMedia("reference_video", 11) + `}`, reject: "media takes at most 10 reference videos on this model, got 11"},
+		{name: "2.0 above 3 reference videos", model: "seedance-2.0-mini", body: `{"model":"seedance-2.0-mini","prompt":"a cat","media":` + mgtvMedia("reference_video", 4) + `}`, reject: "media takes at most 3 reference videos on this model, got 4"},
+		{name: "a reference video url that is not http(s)", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_video","url":"s3://bucket/a.mp4"}]}`, reject: "media[0].url must be an http(s) URL"},
+		{name: "2.5 above 30 reference images", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":` + mgtvMedia("reference_image", 31) + `}`, reject: "media takes at most 30 reference images on this model, got 31"},
+		{name: "2.0 above 9 reference images", model: "seedance-2.0-fast", body: `{"model":"seedance-2.0-fast","prompt":"a cat","media":` + mgtvMedia("reference_image", 10) + `}`, reject: "media takes at most 9 reference images on this model, got 10"},
 		{name: "a media item with an asset_id", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_image","url":"https://cdn.example/a.png","asset_id":"a1"}]}`, reject: "media[0] takes only type and url; remove asset_id"},
 		{name: "a media item that is only an asset_id", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_image","asset_id":"a1"}]}`, reject: "media[0] takes only type and url; remove asset_id"},
 		{name: "a media url that is not http(s)", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"first_frame","url":"https://cdn.example/a.png"},{"type":"last_frame","url":"ftp://cdn.example/b.png"}]}`, reject: "media[1].url must be an http(s) URL"},
 		{name: "a media item without a url", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"first_frame"}]}`, reject: "media[0].url must be an http(s) URL"},
-		{name: "an audio media role", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_audio","url":"https://cdn.example/a.mp3"}]}`, reject: `media[0].type must be one of first_frame, last_frame, reference_image, got "reference_audio"`},
-		{name: "a reference video is not taken yet", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_video","url":"https://cdn.example/a.mp4"}]}`, reject: `media[0].type must be one of first_frame, last_frame, reference_image, got "reference_video"`},
+		{name: "an audio media role", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":[{"type":"reference_audio","url":"https://cdn.example/a.mp3"}]}`, reject: `media[0].type must be one of first_frame, last_frame, reference_image, reference_video, got "reference_audio"`},
 		{name: "media that is not an array", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":{"type":"first_frame","url":"https://cdn.example/a.png"}}`, reject: "media must be an array of {type, url} items"},
 		{name: "input_reference and image_url that disagree", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","input_reference":"https://cdn.example/a.png","image_url":"https://cdn.example/b.png"}`, reject: "image_url and input_reference give different values"},
 		{name: "a first frame that is not an http(s) URL", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","input_reference":"data:image/png;base64,AAAA"}`, reject: "input_reference must be an http(s) URL"},
@@ -635,6 +686,29 @@ func TestMgtvPluginReadsTasks(t *testing.T) {
 				assert.Equal(t, tc.facts, result.UsageFacts)
 			})
 		}
+	})
+
+	// A task with a reference video bills video_input "video" at submission
+	// and keeps it at completion, where the tokens MaaS reports replace the
+	// estimate. The price here is 4 USD per million tokens with a reference
+	// video and 6 without.
+	t.Run("a reference-video task settles at the reference-video price", func(t *testing.T) {
+		submission := submitThroughMgtvVideosAPI(t, plugin, "seedance-2.5", "", `{"model":"seedance-2.5","prompt":"a cat","seconds":5,"media":[{"type":"reference_video","url":"https://cdn.example/a.mp4"}]}`)
+		require.Empty(t, submission.Rejection)
+		assert.Equal(t, map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "video"}, submission.Facts)
+
+		expression := `tier("seedance", u("tokens") * (u("video_input") == "video" ? 4 : 6) / 1000000)`
+		snapshot := &billingexpr.BillingSnapshot{
+			BillingMode: billing_setting.BillingModeTieredExpr, ModelName: "seedance-2.5", ExprString: expression, ExprHash: billingexpr.ExprHashString(expression),
+			GroupRatio: 1, QuotaPerUnit: 500000, ExprVersion: billingexpr.ExprVersion(expression), TaskUsageBilling: true, UsageFacts: submission.Facts,
+		}
+		result, err := adaptor.ParseTaskResult(mgtvTask(model.TaskStatusInProgress, "", ""), &http.Response{StatusCode: http.StatusOK}, []byte(mgtvCompletedVideo))
+		require.NoError(t, err)
+		settled, usage, err := service.EvaluateTaskCompletionUsage(snapshot, result.UsageFacts)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"tokens": float64(108900), "resolution": "720p", "video_input": "video"}, usage)
+		// 108,900 tokens × 4 USD per million × 500,000 quota per USD.
+		assert.Equal(t, 217800, settled.ActualQuotaAfterGroup)
 	})
 }
 
