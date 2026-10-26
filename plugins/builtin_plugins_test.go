@@ -12,12 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "mulerouter", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
+var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "mgtv", "mulerouter", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
 
 // responsesKeys are the built-in plugins that claim openai_responses. mulerouter
 // claims only openai_video: clients reach it through POST /v1/tasks/mulerouter
-// and, for videos, POST /v1/videos.
-var responsesKeys = slices.DeleteFunc(slices.Clone(expectedKeys), func(key string) bool { return key == "mulerouter" })
+// and, for videos, POST /v1/videos. mgtv claims only openai_video too.
+var responsesKeys = slices.DeleteFunc(slices.Clone(expectedKeys), func(key string) bool { return key == "mulerouter" || key == "mgtv" })
 
 func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing.T) {
 	generation := jsplugin.DefaultRegistry.Generation()
