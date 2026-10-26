@@ -21,8 +21,12 @@ The upstream identity of a MuleRouter endpoint, spelled `{vendor}/{model}/{actio
 _Avoid_: Internal model name, full model name
 
 **Public model name**:
-The short, vendor-neutral name a client sends for a MuleRouter endpoint, such as `wan2.2-i2v-spicy`. Prices and model permissions are keyed by it.
+The short, vendor-neutral name a client sends for a model that a task plugin declares and maps to the upstream's own name internally: a MuleRouter endpoint in the mulerouter plugin, such as `wan2.2-i2v-spicy`, or a MaaS model in the mgtv plugin, such as `seedance-2.5`. Prices and model permissions are keyed by it.
 _Avoid_: Alias, short name, client model
+
+**MaaS**:
+MGTV Cloud's model service at `maas-api-pub.cloud.mgtv.com`, which the mgtv task plugin drives through its OpenAI-compatible `/v1/videos` API. Its video models are Seedance 2.x from Volcengine Ark under MaaS model names such as `msd-2-5-260628`, which clients never send or see; the gateway sells them as their own product, apart from the doubao plugin's Seedance models (ADR-0003).
+_Avoid_: MGTV (the company), MSD, Mango
 
 **Vendor parameter**:
 A request field specific to one MuleRouter endpoint (such as width or prompt_extend), outside the gateway's unified task vocabulary. Clients send vendor parameters at the top level of the request or under `metadata`; both count.
