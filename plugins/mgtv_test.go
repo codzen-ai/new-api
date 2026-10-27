@@ -184,10 +184,10 @@ func TestMgtvPluginUsageProfiles(t *testing.T) {
 				assert.Equal(t, "none", example.Facts["video_input"], example.Label)
 			}
 			assert.Equal(t, "720p · 5s", tiers[1].Label)
-			assert.EqualValues(t, 108000, tiers[1].Facts["tokens"])
+			assert.EqualValues(t, 109587, tiers[1].Facts["tokens"])
 			withVideo := examples[len(tc.resolutions)]
 			assert.Equal(t, "720p · 5s · reference video", withVideo.Label)
-			assert.EqualValues(t, 108000, withVideo.Facts["tokens"])
+			assert.EqualValues(t, 109587, withVideo.Facts["tokens"])
 			assert.Equal(t, "720p", withVideo.Facts["resolution"])
 			assert.Equal(t, "video", withVideo.Facts["video_input"])
 		})
@@ -195,9 +195,11 @@ func TestMgtvPluginUsageProfiles(t *testing.T) {
 }
 
 // A text-to-video submission on POST /v1/videos sends this MaaS request and
-// bills these usage facts, or is refused before it is charged. The token
-// estimate is seconds × width × height × 24 / 1024 at the tier's 16:9
-// max-pixel size: 480p 854×480, 720p 1280×720, 1080p 1920×1080, 4k 3840×2160.
+// bills these usage facts, or is refused before it is charged. Seedance bills
+// width × height × (24 × seconds + 1 frames) / 1024 tokens of the output; the
+// estimate rounds that up at the largest Seedance 2.0 output size among the
+// aspect ratios the model takes at the tier: 480p 864×496 (or 992×432), 720p
+// 1112×834, 1080p 2206×946, 4k 3326×2494.
 // POST /v1/tasks/mgtv hands the plugin the same body without the decoder and
 // must send and bill exactly the same.
 func TestMgtvPluginTextToVideoSubmissions(t *testing.T) {
@@ -216,99 +218,110 @@ func TestMgtvPluginTextToVideoSubmissions(t *testing.T) {
 			model:  "seedance-2.5",
 			body:   `{"model":"seedance-2.5","prompt":"a cat"}`,
 			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(-1), "extra_body": map[string]any{"resolution": "720p"}},
-			facts:  map[string]any{"tokens": float64(648000), "resolution": "720p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(652990), "resolution": "720p", "video_input": "none"},
 		},
 		{
 			name:   "2.5 takes -1 written by the caller",
 			model:  "seedance-2.5",
 			body:   `{"model":"seedance-2.5","prompt":"a cat","seconds":"-1","resolution":"1080p"}`,
 			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(-1), "extra_body": map[string]any{"resolution": "1080p"}},
-			facts:  map[string]any{"tokens": float64(30 * 48600), "resolution": "1080p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(1469373), "resolution": "1080p", "video_input": "none"},
 		},
 		{
 			name:   "2.5 at its longest duration",
 			model:  "seedance-2.5",
 			body:   `{"model":"seedance-2.5","prompt":"a cat","duration":30}`,
 			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(30), "extra_body": map[string]any{"resolution": "720p"}},
-			facts:  map[string]any{"tokens": float64(30 * 21600), "resolution": "720p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(652990), "resolution": "720p", "video_input": "none"},
 		},
 		{
 			name:   "2.0 pro defaults to 5 seconds at 720p",
 			model:  "seedance-2.0-pro",
 			body:   `{"model":"seedance-2.0-pro","prompt":"a cat"}`,
 			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "extra_body": map[string]any{"resolution": "720p"}},
-			facts:  map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(109587), "resolution": "720p", "video_input": "none"},
 		},
 		{
 			name:   "2.0 pro generates 4K",
 			model:  "seedance-2.0-pro",
 			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","resolution":"4K"}`,
 			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "extra_body": map[string]any{"resolution": "4K"}},
-			facts:  map[string]any{"tokens": float64(5 * 194400), "resolution": "4k", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(980177), "resolution": "4k", "video_input": "none"},
 		},
 		{
 			name:   "2.0 fast at 480p",
 			model:  "seedance-2.0-fast",
 			body:   `{"model":"seedance-2.0-fast","prompt":"a cat","resolution":"480p","seconds":"15"}`,
 			upload: map[string]any{"model": "msd-2-0-fast-260128", "prompt": "a cat", "seconds": float64(15), "extra_body": map[string]any{"resolution": "480p"}},
-			facts:  map[string]any{"tokens": float64(15 * 9607.5), "resolution": "480p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(151079), "resolution": "480p", "video_input": "none"},
 		},
 		{
-			// The staging verification request of spec #48: about 38,000 tokens.
+			// The staging verification request of spec #48. Its 16:9 output is
+			// 864×496, not 854×480.
 			name:   "2.0 mini 4 seconds at 480p",
 			model:  "seedance-2.0-mini",
 			body:   `{"model":"seedance-2.0-mini","prompt":"a cat","size":"854x480","seconds":"4"}`,
 			upload: map[string]any{"model": "msd-2-0-mini-260615", "prompt": "a cat", "seconds": float64(4), "extra_body": map[string]any{"resolution": "480p", "aspectRatio": "16:9"}},
-			facts:  map[string]any{"tokens": float64(38430), "resolution": "480p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(40595), "resolution": "480p", "video_input": "none"},
+		},
+		{
+			// A paid staging run of this request returned a 496×864 video
+			// that MaaS billed 40,594 completion tokens (496 × 864 × 97 frames
+			// / 1024); the estimate must not fall below it.
+			name:   "2.0 mini 4 seconds at 480p 9:16",
+			model:  "seedance-2.0-mini",
+			body:   `{"model":"seedance-2.0-mini","prompt":"a cat","resolution":"480p","aspect_ratio":"9:16","seconds":"4"}`,
+			upload: map[string]any{"model": "msd-2-0-mini-260615", "prompt": "a cat", "seconds": float64(4), "extra_body": map[string]any{"resolution": "480p", "aspectRatio": "9:16"}},
+			facts:  map[string]any{"tokens": float64(40595), "resolution": "480p", "video_input": "none"},
 		},
 		{
 			name:   "a portrait size names 720p and 9:16",
 			model:  "seedance-2.0-pro",
 			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","size":"720x1280"}`,
 			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "extra_body": map[string]any{"resolution": "720p", "aspectRatio": "9:16"}},
-			facts:  map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(109587), "resolution": "720p", "video_input": "none"},
 		},
 		{
 			name:   "a 2160 short side names 4K",
 			model:  "seedance-2.0-pro",
 			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","size":"3840x2160"}`,
 			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "extra_body": map[string]any{"resolution": "4K", "aspectRatio": "16:9"}},
-			facts:  map[string]any{"tokens": float64(5 * 194400), "resolution": "4k", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(980177), "resolution": "4k", "video_input": "none"},
 		},
 		{
 			name:   "size agrees with resolution and aspect_ratio",
 			model:  "seedance-2.5",
 			body:   `{"model":"seedance-2.5","prompt":"a cat","size":"1280x720","resolution":"720p","aspect_ratio":"16:9","seconds":5}`,
 			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(5), "extra_body": map[string]any{"resolution": "720p", "aspectRatio": "16:9"}},
-			facts:  map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(109587), "resolution": "720p", "video_input": "none"},
 		},
 		{
 			name:   "2.5 takes the adaptive aspect ratio and mov",
 			model:  "seedance-2.5",
 			body:   `{"model":"seedance-2.5","prompt":"a cat","aspect_ratio":"adaptive","output_format":"mov","seconds":4}`,
 			upload: map[string]any{"model": "msd-2-5-260628", "prompt": "a cat", "seconds": float64(4), "extra_body": map[string]any{"resolution": "720p", "aspectRatio": "adaptive", "output_format": "mov"}},
-			facts:  map[string]any{"tokens": float64(4 * 21600), "resolution": "720p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(87851), "resolution": "720p", "video_input": "none"},
 		},
 		{
 			name:   "with_audio false and seed 0 reach MaaS",
 			model:  "seedance-2.0-mini",
 			body:   `{"model":"seedance-2.0-mini","prompt":"a cat","with_audio":false,"seed":0}`,
 			upload: map[string]any{"model": "msd-2-0-mini-260615", "prompt": "a cat", "seconds": float64(5), "extra_body": map[string]any{"resolution": "720p", "withAudio": false, "seed": float64(0)}},
-			facts:  map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(109587), "resolution": "720p", "video_input": "none"},
 		},
 		{
 			name:   "vendor parameters under metadata count",
 			model:  "seedance-2.0-pro",
 			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","metadata":{"duration":8,"resolution":"1080p","aspect_ratio":"1:1","with_audio":true,"seed":42}}`,
 			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(8), "extra_body": map[string]any{"resolution": "1080p", "aspectRatio": "1:1", "withAudio": true, "seed": float64(42)}},
-			facts:  map[string]any{"tokens": float64(8 * 48600), "resolution": "1080p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(393328), "resolution": "1080p", "video_input": "none"},
 		},
 		{
 			name:   "the top level and metadata that agree",
 			model:  "seedance-2.0-pro",
 			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","seconds":"6","metadata":{"duration":6}}`,
 			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(6), "extra_body": map[string]any{"resolution": "720p"}},
-			facts:  map[string]any{"tokens": float64(6 * 21600), "resolution": "720p", "video_input": "none"},
+			facts:  map[string]any{"tokens": float64(131323), "resolution": "720p", "video_input": "none"},
 		},
 		{name: "seconds and duration that disagree", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","seconds":"8","duration":5}`, reject: "duration and seconds give different values"},
 		{name: "the top level and metadata that disagree", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","resolution":"480p","metadata":{"resolution":"720p"}}`, reject: "resolution and metadata.resolution give different values"},
@@ -390,8 +403,8 @@ func mgtvMediaItems(role string, n int) []any {
 // send and bill exactly the same.
 func TestMgtvPluginMediaInputSubmissions(t *testing.T) {
 	plugin := newMgtvPlugin(t)
-	facts720p5s := map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"}
-	withVideo720p5s := map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "video"}
+	facts720p5s := map[string]any{"tokens": float64(109587), "resolution": "720p", "video_input": "none"}
+	withVideo720p5s := map[string]any{"tokens": float64(109587), "resolution": "720p", "video_input": "video"}
 	cases := []struct {
 		name   string
 		model  string
@@ -502,7 +515,7 @@ func TestMgtvPluginMediaInputSubmissions(t *testing.T) {
 			model:  "seedance-2.0-pro",
 			body:   `{"model":"seedance-2.0-pro","prompt":"a cat","resolution":"1080p","media":` + mgtvMedia("reference_video", 3) + `}`,
 			upload: map[string]any{"model": "msd-2-0-pro-260128", "prompt": "a cat", "seconds": float64(5), "media": mgtvMediaItems("reference_video", 3), "extra_body": map[string]any{"resolution": "1080p"}},
-			facts:  map[string]any{"tokens": float64(5 * 48600), "resolution": "1080p", "video_input": "video"},
+			facts:  map[string]any{"tokens": float64(246594), "resolution": "1080p", "video_input": "video"},
 		},
 		{name: "2.5 above 10 reference videos", model: "seedance-2.5", body: `{"model":"seedance-2.5","prompt":"a cat","media":` + mgtvMedia("reference_video", 11) + `}`, reject: "media takes at most 10 reference videos on this model, got 11"},
 		{name: "2.0 above 3 reference videos", model: "seedance-2.0-mini", body: `{"model":"seedance-2.0-mini","prompt":"a cat","media":` + mgtvMedia("reference_video", 4) + `}`, reject: "media takes at most 3 reference videos on this model, got 4"},
@@ -558,7 +571,7 @@ func TestMgtvPluginServesOnlyPublicModelNames(t *testing.T) {
 			if tc.maasModel != "" {
 				require.Empty(t, submission.Rejection)
 				assert.Equal(t, tc.maasModel, submission.Body["model"])
-				assert.Equal(t, map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "none"}, submission.Facts)
+				assert.Equal(t, map[string]any{"tokens": float64(109587), "resolution": "720p", "video_input": "none"}, submission.Facts)
 				return
 			}
 			assert.Contains(t, submission.Rejection, "this model is not available on this channel")
@@ -695,7 +708,7 @@ func TestMgtvPluginReadsTasks(t *testing.T) {
 	t.Run("a reference-video task settles at the reference-video price", func(t *testing.T) {
 		submission := submitThroughMgtvVideosAPI(t, plugin, "seedance-2.5", "", `{"model":"seedance-2.5","prompt":"a cat","seconds":5,"media":[{"type":"reference_video","url":"https://cdn.example/a.mp4"}]}`)
 		require.Empty(t, submission.Rejection)
-		assert.Equal(t, map[string]any{"tokens": float64(108000), "resolution": "720p", "video_input": "video"}, submission.Facts)
+		assert.Equal(t, map[string]any{"tokens": float64(109587), "resolution": "720p", "video_input": "video"}, submission.Facts)
 
 		expression := `tier("seedance", u("tokens") * (u("video_input") == "video" ? 4 : 6) / 1000000)`
 		snapshot := &billingexpr.BillingSnapshot{
