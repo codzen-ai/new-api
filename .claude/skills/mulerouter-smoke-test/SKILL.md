@@ -72,7 +72,7 @@ python3 .claude/skills/mulerouter-smoke-test/scripts/mulerouter_smoke_test.py --
 
 需要输入图的用例（`qwen-edit`、`wan-*`）会自动排到后面，用前面 z-image 产物的 `content_url` 当输入。这个地址在本站上，生成服务必须访问得到：测 localhost 这类外网到不了的实例时，传 `--image-url` 给一张公网图。
 
-单个用例的链路是：提交 → 断言 200 和本站任务 ID → 轮询到终态 → 取产物并 HEAD 一次 `content_url` → 读消费日志 → 复算扣费。视频用例慢，`--poll-timeout` 默认 600 秒。
+单个用例的链路是：提交 → 断言 200 和本站任务 ID → 轮询到终态 → 取产物并用 GET 探一次 `content_url`（带 `Range: bytes=0-0`，只取 1 个字节） → 读消费日志 → 复算扣费。视频用例慢，`--poll-timeout` 默认 600 秒。
 
 **`POST /v1/videos` 脚本不覆盖**，验证 OpenAI 视频入口时手工发一次标准写法，输入图用 z-image 用例的产物：
 
@@ -96,7 +96,7 @@ curl -sS -D - -X POST "$NEW_API_BASE_URL/v1/videos" -H "Authorization: Bearer $N
 | `billing_ratios` | 提交响应头 `X-New-Api-Other-Ratios` 等于该用例期望的倍率 | 计费变量没生效或配错了 |
 | `task_completed` | 轮询到 `SUCCESS` | 上游失败，或响应体形状和假设不符 |
 | `artifact_listed` | `/artifacts` 列出一个产物：图片模型是 `image-1`（`image`），视频模型是 `video`（`video`） | 产物解析和假设不符（插件的 `listArtifacts`） |
-| `artifact_content` | 不带令牌 HEAD `content_url` 返回 200，`Content-Type` 是 `image/*` 或 `video/*` | 产物下载链路不通（插件的 `buildContentRequest`，或上游产物链接失效） |
+| `artifact_content` | 不带令牌 GET `content_url`（`Range: bytes=0-0`）返回 200 或 206，`Content-Type` 是 `image/*` 或 `video/*`。不用 HEAD：调用方都用 GET 下载，上游签名链接只对 GET 有效 | 产物下载链路不通（插件的 `buildContentRequest`，或上游产物链接失效） |
 | `quota_charged` | 扣费 == `固定价 × 倍率 × 分组倍率 × QuotaPerUnit` | 计费链路和预期不符 |
 | `group_routed` | 消费日志的分组 == 目标分组 | 请求没落到目标分组的渠道上，测的不是你想测的渠道 |
 | `vendor_hidden` | 调用方能看到的五个响应里没有 `carrothub` 和 `muleusercontent`，见下文 | 调用方能看出背后是 MuleRouter |

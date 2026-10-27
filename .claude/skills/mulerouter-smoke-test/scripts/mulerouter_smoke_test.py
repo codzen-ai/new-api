@@ -418,8 +418,11 @@ def poll_task(client, task_id, timeout, interval):
 
 
 def fetch_artifacts(client, task_id):
-    """读产物列表，并用 HEAD 探一下第一个产物的 content_url：链接自带访问凭证，
-    不带令牌也要能取到，Content-Type 要和产物类型一致。"""
+    """读产物列表，并用 GET 探一下第一个产物的 content_url：链接自带访问凭证，
+    不带令牌也要能取到，Content-Type 要和产物类型一致。
+    不用 HEAD：调用方下载都是 GET，而上游的签名链接（如 COS）只对 GET 签名，
+    HEAD 会在上游被拒，测出的失败不是调用方会遇到的。带 Range 只取 1 个字节，
+    宿主不转发 Range 时返回 200 整个文件，只读响应头就关掉。"""
     status, _, payload = client.relay("GET", f"{TASK_PATH}/{task_id}/artifacts")
     artifacts = (payload.get("artifacts") or []) if isinstance(payload, dict) else []
     found = {"artifacts_status": status, "artifacts": artifacts}
@@ -427,8 +430,8 @@ def fetch_artifacts(client, task_id):
     url = first.get("content_url") or ""
     if url:
         try:
-            head = urllib.request.Request(url, method="HEAD")
-            with urllib.request.urlopen(head, timeout=60) as resp:
+            probe = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+            with urllib.request.urlopen(probe, timeout=60) as resp:
                 found["content_status"], found["content_type"] = resp.status, resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as exc:
             found["content_status"], found["content_type"] = exc.code, ""
@@ -540,9 +543,9 @@ def verify_case(result, case_name, ctx):
         check("artifact_listed", len(artifacts) == 1 and first.get("key") == want_key
               and first.get("type") == case["artifact_type"],
               f"期望一个 {want_key}（{case['artifact_type']}），实际 {[(a.get('key'), a.get('type')) for a in artifacts]}")
-        check("artifact_content", result.get("content_status") == 200
+        check("artifact_content", result.get("content_status") in (200, 206)
               and str(result.get("content_type", "")).startswith(case["artifact_type"] + "/"),
-              f"HEAD content_url -> HTTP {result.get('content_status')}，Content-Type {result.get('content_type')}")
+              f"GET content_url -> HTTP {result.get('content_status')}，Content-Type {result.get('content_type')}")
 
     if "caller_views" in result:
         leaks = find_vendor_leaks(result["caller_views"])
