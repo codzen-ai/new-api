@@ -418,13 +418,14 @@ func TestMulerouterPluginSubmissions(t *testing.T) {
 			ratios: map[string]float64{"seconds": 5, "resolution": 1},
 		},
 		{
-			// The host's request bounds refuse a null duration at any depth
-			// before the plugin runs. The Go adaptor billed it as the default
-			// 5 seconds at 480p.
+			// A null duration is sent upstream as is and bills the default 5
+			// seconds at 480p, as the Go adaptor billed it.
 			name:   "wan2.2 null duration in metadata",
 			model:  "wan2.2-i2v-spicy",
 			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":{"duration":null}}`,
-			reject: "plugin usage value must be a number",
+			url:    wanVideo,
+			upload: map[string]any{"prompt": "orbit", "image": "https://cdn/in.png", "duration": nil},
+			ratios: map[string]float64{"seconds": 5, "resolution": 1},
 		},
 		{
 			name:   "wan2.2 fractional top-level duration",
@@ -433,13 +434,12 @@ func TestMulerouterPluginSubmissions(t *testing.T) {
 			reject: "duration must be an integer, got 5.5",
 		},
 		{
-			// The host checks every duration in the request before the plugin
-			// runs, so it refuses this instead of the endpoint. The Go adaptor
-			// refused it too, saying the duration is not a number.
+			// The Go adaptor refused it too, saying the duration is not a
+			// number.
 			name:   "wan2.2 top-level duration that is not a number",
 			model:  "wan2.2-i2v-spicy",
 			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":"eight"}`,
-			reject: "plugin usage value must be a number",
+			reject: `invalid value for duration: "eight" is not a number`,
 		},
 		{
 			name:   "wan2.2 top-level duration 0",
@@ -472,33 +472,32 @@ func TestMulerouterPluginSubmissions(t *testing.T) {
 			reject: "invalid value 9 for duration, allowed: 5, 8",
 		},
 		{
-			// The host bounds every duration in the request before the plugin
-			// runs, so it refuses these instead of the endpoint. The Go adaptor
-			// refused them too, saying the seconds or the duration were out of
-			// range.
+			// The Go adaptor refused these too, saying the seconds or the
+			// duration were out of range.
 			name:   "wan2.2 negative top-level duration",
 			model:  "wan2.2-i2v-spicy",
 			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":-5}`,
-			reject: "plugin usage value must be a finite non-negative number",
+			reject: "invalid value -5 for duration, allowed: 5, 8",
 		},
 		{
 			name:   "wan2.2 negative duration in metadata",
 			model:  "wan2.2-i2v-spicy",
 			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":{"duration":-5}}`,
-			reject: "plugin usage value must be a finite non-negative number",
+			reject: "invalid value -5 for duration, allowed: 5, 8",
 		},
 		{
 			name:   "wan2.2 duration far above its values",
 			model:  "wan2.2-i2v-spicy",
 			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","duration":100000}`,
-			reject: "plugin usage value exceeds the host limit",
+			reject: "invalid value 100000 for duration, allowed: 5, 8",
 		},
 		{
-			// A wrapped negative 64-bit integer.
+			// A wrapped negative 64-bit integer, which JavaScript reads as a
+			// float.
 			name:   "wan2.2 huge duration in metadata",
 			model:  "wan2.2-i2v-spicy",
 			body:   `{"model":"wan2.2-i2v-spicy","prompt":"orbit","image":"https://cdn/in.png","metadata":{"duration":18446744073686646784}}`,
-			reject: "plugin usage value exceeds the host limit",
+			reject: "invalid value 18446744073686647000 for duration, allowed: 5, 8",
 		},
 		{
 			name:   "wan2.2 unknown resolution",
