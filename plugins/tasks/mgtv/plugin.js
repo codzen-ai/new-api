@@ -49,21 +49,55 @@ const ENDPOINTS = {
 // The resolution an omitted one sends (spec #48).
 const DEFAULT_RESOLUTION = "720p";
 
+// The aspect ratios a WIDTHxHEIGHT size can name, which are the W:H ratios
+// the endpoints take (adaptive has no size), and the resolution tier of its
+// short side.
+const SIZE_ASPECT_RATIOS = [];
+for (const endpoint of Object.values(ENDPOINTS)) {
+  for (const ratio of endpoint.aspectRatios) {
+    if (/^\d+:\d+$/.test(ratio) && SIZE_ASPECT_RATIOS.indexOf(ratio) < 0) SIZE_ASPECT_RATIOS.push(ratio);
+  }
+}
+const SIZE_SHORT_SIDES = { 480: "480p", 720: "720p", 1080: "1080p", 2160: "4k" };
+
 // Every resolution tier, in the gateway's spelling, with the spelling MaaS
-// takes and the 16:9 max-pixel size the token estimate uses.
+// takes and the width × height of the video Seedance 2.0 outputs at each
+// aspect ratio. Source: the "不同宽高比对应的宽高像素值" table under ratio in
+// Volcengine Ark's video generation API reference
+// (https://www.volcengine.com/docs/82379/1520757), Seedance 2.0 series column.
+// Seedance 2.5 outputs the same sizes except 854×480 and 480×854 at 480p
+// 16:9 and 9:16, which are smaller. An adaptive ratio outputs one of these.
 const RESOLUTIONS = {
-  "480p": { maas: "480p", width: 854, height: 480 },
-  "720p": { maas: "720p", width: 1280, height: 720 },
-  "1080p": { maas: "1080p", width: 1920, height: 1080 },
-  "4k": { maas: "4K", width: 3840, height: 2160 },
+  "480p": {
+    maas: "480p",
+    sizes: { "16:9": [864, 496], "4:3": [752, 560], "1:1": [640, 640], "3:4": [560, 752], "9:16": [496, 864], "21:9": [992, 432] },
+  },
+  "720p": {
+    maas: "720p",
+    sizes: { "16:9": [1280, 720], "4:3": [1112, 834], "1:1": [960, 960], "3:4": [834, 1112], "9:16": [720, 1280], "21:9": [1470, 630] },
+  },
+  "1080p": {
+    maas: "1080p",
+    sizes: { "16:9": [1920, 1080], "4:3": [1664, 1248], "1:1": [1440, 1440], "3:4": [1248, 1664], "9:16": [1080, 1920], "21:9": [2206, 946] },
+  },
+  "4k": {
+    maas: "4K",
+    sizes: { "16:9": [3840, 2160], "4:3": [3326, 2494], "1:1": [2880, 2880], "3:4": [2494, 3326], "9:16": [2160, 3840], "21:9": [4398, 1886] },
+  },
 };
 
-// Seedance bills tokens = seconds × width × height × 24 / 1024 (the doubao
-// plugin's formula). The estimate takes the tier's 16:9 max-pixel size, so it
-// covers every aspect ratio of that tier.
-function estimateTokens(seconds, resolution) {
-  const size = RESOLUTIONS[resolution];
-  return (seconds * size.width * size.height * 24) / 1024;
+// Seedance bills tokens = width × height × frames / 1024 of the output video,
+// at 24 frames a second plus one: a 4-second 496×864 video bills 496 × 864 ×
+// 97 / 1024 = 40,594 tokens (a paid MaaS run). The estimate takes the largest
+// size among the aspect ratios the model takes at the tier, so it covers
+// every one of them, and rounds up.
+function estimateTokens(seconds, resolution, aspectRatios) {
+  const sizes = RESOLUTIONS[resolution].sizes;
+  let pixels = 0;
+  for (const ratio of aspectRatios) {
+    if (sizes[ratio]) pixels = Math.max(pixels, sizes[ratio][0] * sizes[ratio][1]);
+  }
+  return Math.ceil((pixels * (24 * seconds + 1)) / 1024);
 }
 
 function usageSchema(resolutions) {
@@ -92,33 +126,32 @@ function usageSchema(resolutions) {
 }
 
 // Display examples: a 5-second video at each tier the model offers, and a
-// 5-second video at the default resolution with a reference video.
-function usageExamples(resolutions) {
+// 5-second video at the default resolution with a reference video, estimated
+// over the aspect ratios the model takes.
+function usageExamples(resolutions, aspectRatios) {
   const examples = resolutions.map((resolution) => ({
     label: resolution + " · 5s",
-    facts: { tokens: Math.round(estimateTokens(5, resolution)), resolution: resolution, video_input: "none" },
+    facts: { tokens: estimateTokens(5, resolution, aspectRatios), resolution: resolution, video_input: "none" },
   }));
   examples.push({
     label: DEFAULT_RESOLUTION + " · 5s · reference video",
-    facts: { tokens: Math.round(estimateTokens(5, DEFAULT_RESOLUTION)), resolution: DEFAULT_RESOLUTION, video_input: "video" },
+    facts: { tokens: estimateTokens(5, DEFAULT_RESOLUTION, aspectRatios), resolution: DEFAULT_RESOLUTION, video_input: "video" },
   });
   return examples;
 }
 
-// One usage profile per set of resolution tiers: the pricing page lists only
-// the tiers each model offers.
+// One usage profile per set of resolution tiers and aspect ratios: the pricing
+// page lists only the tiers each model offers, with examples estimated over the
+// aspect ratios it takes.
 function usageProfiles() {
-  const profiles = [];
+  const profiles = {};
   for (const name of Object.keys(ENDPOINTS)) {
-    const resolutions = ENDPOINTS[name].resolutions;
-    let profile = profiles.find((entry) => entry.schema.resolution.enum.join() === resolutions.join());
-    if (!profile) {
-      profile = { models: [], schema: usageSchema(resolutions), examples: usageExamples(resolutions) };
-      profiles.push(profile);
-    }
-    profile.models.push(name);
+    const { resolutions, aspectRatios } = ENDPOINTS[name];
+    const key = resolutions.join() + "|" + aspectRatios.join();
+    if (!profiles[key]) profiles[key] = { models: [], schema: usageSchema(resolutions), examples: usageExamples(resolutions, aspectRatios) };
+    profiles[key].models.push(name);
   }
-  return profiles;
+  return Object.values(profiles);
 }
 
 export const meta = {
@@ -137,7 +170,7 @@ export const meta = {
   models: Object.keys(ENDPOINTS),
   fetchMode: "per_task",
   usageSchema: usageSchema(Object.keys(RESOLUTIONS)),
-  usageExamples: usageExamples(Object.keys(RESOLUTIONS)),
+  usageExamples: usageExamples(Object.keys(RESOLUTIONS), SIZE_ASPECT_RATIOS),
   usageProfiles: usageProfiles(),
   protocols: ["openai_video"],
 };
@@ -163,17 +196,6 @@ function wholeNumber(name, raw) {
   if (typeof value !== "number" || !Number.isInteger(value)) throw new Error(name + " must be a whole number, got " + quoted(raw));
   return value;
 }
-
-// The aspect ratios a WIDTHxHEIGHT size can name, which are the W:H ratios
-// the endpoints take (adaptive has no size), and the resolution tier of its
-// short side.
-const SIZE_ASPECT_RATIOS = [];
-for (const endpoint of Object.values(ENDPOINTS)) {
-  for (const ratio of endpoint.aspectRatios) {
-    if (/^\d+:\d+$/.test(ratio) && SIZE_ASPECT_RATIOS.indexOf(ratio) < 0) SIZE_ASPECT_RATIOS.push(ratio);
-  }
-}
-const SIZE_SHORT_SIDES = { 480: "480p", 720: "720p", 1080: "1080p", 2160: "4k" };
 
 // The OpenAI size WIDTHxHEIGHT names a resolution by its short side and an
 // aspect ratio by its width over height, within 1% (854x480 is 16:9).
@@ -351,7 +373,7 @@ function maasRequest(endpoint, body) {
     action: hasImageInput ? "image_to_video" : "text_to_video",
     // A reference video selects its own token price; its length is not in
     // the estimate, and the task settles on the tokens MaaS reports.
-    facts: { tokens: estimateTokens(billedSeconds, resolution), resolution: resolution, video_input: roleCounts.reference_video ? "video" : "none" },
+    facts: { tokens: estimateTokens(billedSeconds, resolution, endpoint.aspectRatios), resolution: resolution, video_input: roleCounts.reference_video ? "video" : "none" },
   };
 }
 
