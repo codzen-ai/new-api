@@ -81,7 +81,8 @@ func mulerouterSubmitContext(t *testing.T, publicModel, modelMapping, body strin
 	return c
 }
 
-func readMulerouterBody(t *testing.T, reader io.Reader) map[string]any {
+// readJSONBody decodes the JSON request body a plugin sends upstream.
+func readJSONBody(t *testing.T, reader io.Reader) map[string]any {
 	t.Helper()
 	encoded, err := io.ReadAll(reader)
 	require.NoError(t, err)
@@ -117,7 +118,7 @@ func submitToMulerouterPlugin(t *testing.T, plugin *jsplugin.LoadedPlugin, c *gi
 	require.NoError(t, err)
 	reader, err := adaptor.BuildRequestBody(c, info)
 	require.NoError(t, err)
-	return mulerouterSubmission{URL: url, Body: readMulerouterBody(t, reader), Ratios: ratios, Action: info.Action}
+	return mulerouterSubmission{URL: url, Body: readJSONBody(t, reader), Ratios: ratios, Action: info.Action}
 }
 
 // submitThroughMulerouterPlugin is a client request on POST
